@@ -30,13 +30,13 @@ Podaci potječu iz baze **DigiKat** (Hrvatsko katoličko sveučilište), javno d
 
 ## Pregled radnog materijala
 
-| Format | Opis |
-|--------|------|
-| [📄 HTML](manuscript/manuscript_one.html) | Pregled u pregledniku — tablice i formatiranje |
-| [📕 PDF](manuscript/manuscript_one.pdf) | Za ispis i anotacije |
-| [📝 Word](manuscript/manuscript_one.docx) | Za komentiranje i suradnju |
+| Format | Veza | Opis |
+|--------|------|------|
+| 📄 HTML | [Otvori u pregledniku](https://lusiki.github.io/Memorijalni-okvir/manuscript/manuscript_one.html) | Tablice i formatiranje u pregledniku |
+| 📕 PDF | [Preuzmi PDF](https://github.com/lusiki/Memorijalni-okvir/raw/master/manuscript/manuscript_one.pdf) | Za ispis i anotacije |
+| 📝 Word | [Preuzmi Word](https://github.com/lusiki/Memorijalni-okvir/raw/master/manuscript/manuscript_one.docx) | Za komentiranje i suradnju |
 
-> **Napomena za koautore:** Rad je u fazi radne verzije (*working paper*). Nedostaju poglavlja §5 Rasprava i §6 Zaključak, sažetak i konačna intercoder-provjera pouzdanosti rječnika. Komentare možete upisivati izravno u Word dokument.
+> **Napomena za koautore:** Rad je u fazi radne verzije (*working paper*). Nedostaju poglavlja §5 Rasprava i §6 Zaključak, sažetak i konačna intercoder-provjera pouzdanosti rječnika. Komentare možete upisivati izravno u Word dokument. GitHub Pages može trebati nekoliko minuta do prvog učitavanja HTML veze.
 
 ---
 
