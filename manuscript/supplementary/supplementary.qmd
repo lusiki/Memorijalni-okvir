@@ -1,0 +1,222 @@
+---
+title: "Prilog uz rad »Tri registra religijskog turizma«"
+subtitle: "Dodatne tablice, slike i metodološki dokumenti"
+date: today
+format:
+  html:
+    toc: true
+    number-sections: true
+  pdf:
+    documentclass: article
+    papersize: a4
+    fontsize: 11pt
+    geometry: margin=2.5cm
+    number-sections: true
+  docx:
+    number-sections: true
+bibliography: ../references.bib
+csl: ../citation-style.csl
+lang: hr
+---
+
+```{r setup}
+#| include: false
+library(data.table)
+library(gt)
+library(stringi)
+
+multinom_path <- "../../analysis/02-descriptive/output/tables/02c_multinom_full.csv"
+stm_summary_path <- "../../analysis/03-framing/output/tables/03a_topic_summary.csv"
+
+# Helper: zamijeni decimalnu točku zarezom (hrvatski standard)
+hr_num <- function(x, digits = 3) {
+  s <- formatC(x, format = "f", digits = digits)
+  stri_replace_all_fixed(s, ".", ",")
+}
+hr_p <- function(p) {
+  fifelse(
+    p < 0.001,
+    "< 0,001",
+    stri_replace_all_fixed(formatC(p, format = "f", digits = 3), ".", ",")
+  )
+}
+```
+
+# Slike
+
+## Slika S1: Dijagnostika izbora *K* za STM {#fig-searchk}
+
+![Dijagnostika izbora optimalnog broja tema *K* u strukturalnom modelu tema (STM) za korpus od 13 921 članka. Logaritamska vjerodostojnost na uzorku zadržanih dokumenata (held-out, 10 %) dostiže maksimum pri *K* = 30; semantička koherentnost (negativnija vrijednost = manje koherentne teme) monotono opada s povećanjem *K*, dok se ekskluzivnost (FREX-mjera) neznatno povećava. Granica bound rezidualne pogreške najjače pada do *K* = 30, što potvrđuje *K* = 30 kao operativan optimum među ispitanim vrijednostima *K* ∈ {5, 7, 9, 10, 12, 15, 18, 20, 25, 30, 35}.](../figures/slika_s01_searchk.png){#fig-searchk-img width="95%"}
+
+# Tablice
+
+## Tablica S1: Multinomijalna logistička regresija -- puni koeficijenti {#tbl-s1}
+
+Tablica S1 prikazuje pune koeficijente multinomijalne logističke regresije iz §4.1. Ovisna varijabla je šestočlana klasifikacija okvira; referentna kategorija je *religijski_isključivo*. Model je procijenjen R-paketom `nnet` (verzija 7.3-19), a uvjeti konvergencije provjereni su Hessianovom matricom. AIC = 33 087. Dva okvira sa skandal-registrom (*religijski_sa_skandalom*, *turistički_sa_skandalom*) izostavljena su iz multinomijalne procjene zbog niske ukupne zastupljenosti (skupno < 2 % korpusa) koja onemogućuje pouzdanu procjenu pripadajućih koeficijenata; njihova distribucija prikazana je u Tablici 1 glavnog teksta. Predstojeća tablica grupira predikatore prema tipu (konstanta, destinacija, tip destinacije, godina, mjesec, platforma, blagdanski prozor) radi preglednosti.
+
+```{r tbl-multinom}
+#| echo: false
+#| message: false
+#| warning: false
+
+multinom <- fread(multinom_path, encoding = "UTF-8")
+
+# Razvrstaj prediktore po tipu radi grupiranja
+multinom[, predictor_type := fcase(
+  predictor == "(Intercept)", "1. Konstanta",
+  stri_startswith_fixed(predictor, "destination_f"), "2. Destinacija",
+  stri_startswith_fixed(predictor, "dest_type_f"), "3. Tip destinacije",
+  predictor == "year_num", "4. Godina (kontinuirano)",
+  stri_startswith_fixed(predictor, "month_f"), "5. Mjesec (referentno: siječanj)",
+  stri_startswith_fixed(predictor, "platform_f"), "6. Platforma (referentno: blog)",
+  predictor == "feast_fwindow", "7. Blagdanski prozor (±7 dana)",
+  default = "8. Ostalo"
+)]
+
+# Očisti naziv prediktora
+multinom[, predictor_clean := stri_replace_first_regex(
+  predictor,
+  "^(destination_f|dest_type_f|month_f|platform_f|feast_f)",
+  ""
+)]
+multinom[predictor == "(Intercept)", predictor_clean := "(Konstanta)"]
+multinom[predictor == "year_num", predictor_clean := "Godina (centirana)"]
+multinom[predictor == "feast_fwindow", predictor_clean := "Blagdanski prozor"]
+
+# Lokaliziraj nazive ishoda i mjeseca
+outcome_lab <- c(
+  "religious_memorial" = "Religijsko-memorijalni",
+  "religious_tourism_mixed" = "Religijsko-turistički mješoviti",
+  "tourism_only" = "Turistički isključivo"
+)
+multinom[, outcome_hr := outcome_lab[outcome]]
+
+month_lab <- c("2"="veljača","3"="ožujak","4"="travanj","5"="svibanj","6"="lipanj","7"="srpanj","8"="kolovoz","9"="rujan","10"="listopad","11"="studeni","12"="prosinac")
+multinom[stri_startswith_fixed(predictor, "month_f"),
+         predictor_clean := month_lab[predictor_clean]]
+
+# Sortiraj
+multinom <- multinom[order(outcome_hr, predictor_type, predictor_clean)]
+
+# Formatiraj brojčane stupce
+multinom[, beta_str := hr_num(coef, 3)]
+multinom[, or_str := hr_num(odds_ratio, 3)]
+multinom[, se_str := hr_num(se, 3)]
+multinom[, p_str := hr_p(p_value)]
+multinom[, sig := fcase(
+  p_value < 0.001, "***",
+  p_value < 0.01, "**",
+  p_value < 0.05, "*",
+  default = ""
+)]
+
+multinom_render <- multinom[, .(
+  outcome_hr, predictor_type, predictor_clean,
+  beta_str, se_str, or_str, p_str, sig
+)]
+setnames(multinom_render,
+  c("outcome_hr","predictor_type","predictor_clean",
+    "beta_str","se_str","or_str","p_str","sig"),
+  c("Ishod","Skupina","Prediktor","β","SE(β)","OR","*p*","")
+)
+
+multinom_render |>
+  gt(groupname_col = "Ishod", rowname_col = "Prediktor") |>
+  tab_stubhead(label = "Prediktor") |>
+  tab_options(
+    table.font.size = "x-small",
+    row_group.font.weight = "bold"
+  ) |>
+  tab_source_note(
+    source_note = "Napomena: β = koeficijent na logaritamskoj skali omjera šansi; OR = omjer šansi (exp β); SE(β) = standardna pogreška koeficijenta; *p* = razina statističke značajnosti. Razine značajnosti: *** *p* < 0,001; ** *p* < 0,01; * *p* < 0,05. Referentna kategorija ovisne varijable: *religijski_isključivo*. Referentna razina destinacije: *aljmaš*. Referentna razina tipa destinacije: *lokalno_marijansko*. AIC = 33 087, *N* = 13 921."
+  ) |>
+  cols_align(align = "right", columns = c("β","SE(β)","OR","*p*")) |>
+  cols_align(align = "left", columns = c("Skupina","")) |>
+  fmt_markdown(columns = "Prediktor")
+```
+
+## Tablica S2: Strukturalni model tema -- sažetak svih 30 tema {#tbl-s2}
+
+Tablica S2 prikazuje sve 30 tema iz STM-a (*K* = 30) procijenjenoga u §4.3. Za svaku temu prikazuju se: top-pet riječi po FREX-u (kombinacija frekvencije i ekskluzivnosti); broj članaka kojima je tema modalna (najveći očekivani udio među svim temama u tom članku); modalni rječnički okvir među člancima u temi; udjeli članaka koji aktiviraju religijski (pct~rel~) i turistički (pct~tour~) registar; čistoća teme (engl. purity) -- udio modalne kategorije u članicima teme; te sugerirana kategorija okvira temeljem registarskih udjela. Teme su sortirane po broju članaka silazno radi vidljivosti najraširenijih tema. Memorijalna tema *T19* i Voćin/Aljmaš tema *T8* označene su podebljano.
+
+```{r tbl-stm}
+#| echo: false
+#| message: false
+#| warning: false
+
+stm <- fread(stm_summary_path, encoding = "UTF-8")
+
+modal_lab <- c(
+  "religious_only" = "religijski isključivo",
+  "religious_tourism_mixed" = "religijsko-turistički mješoviti",
+  "tourism_only" = "turistički isključivo"
+)
+stm[, modal_hr := modal_lab[modal_frame]]
+
+# Sažetak po temi: top-5 FREX, n, modalni okvir, pct_rel, pct_tour, purity, sugestija
+stm_render <- stm[, .(
+  topic = sprintf("T%d", topic),
+  top_frex,
+  n,
+  modal_hr,
+  pct_rel = hr_num(pct_rel, 1),
+  pct_tour = hr_num(pct_tour, 1),
+  purity = hr_num(purity * 100, 1),
+  suggested_frame
+)]
+setorder(stm_render, -n)
+
+# Označi memorijalne teme
+stm_render[, topic_md := fifelse(
+  topic %in% c("T19", "T8"),
+  paste0("**", topic, "**"),
+  topic
+)]
+stm_render[, top_frex_md := fifelse(
+  topic %in% c("T19", "T8"),
+  paste0("**", top_frex, "**"),
+  top_frex
+)]
+
+stm_out <- stm_render[, .(
+  topic_md, top_frex_md, n, modal_hr, pct_rel, pct_tour, purity, suggested_frame
+)]
+setnames(stm_out,
+  c("topic_md","top_frex_md","n","modal_hr","pct_rel","pct_tour","purity","suggested_frame"),
+  c("Tema","FREX-vrh (top-5)","*N*","Modalni okvir","pct~rel~ (%)","pct~tour~ (%)","Čistoća (%)","Sugerirani okvir")
+)
+
+stm_out |>
+  gt() |>
+  tab_options(table.font.size = "x-small") |>
+  tab_source_note(
+    source_note = "Napomena: FREX = mjera koja kombinira frekvenciju i ekskluzivnost riječi (Bischof i Airoldi, 2012); top-pet riječi po toj mjeri sažeto opisuju tematski sadržaj. *N* = broj članaka kojima je tema modalna. Modalni okvir = najčešća rječnička kategorija među člancima teme. pct~rel~ i pct~tour~ = postotak članaka u temi koji aktiviraju religijski odnosno turistički registar. Čistoća = udio modalnog okvira u članicima teme. Sugerirani okvir = automatska klasifikacija temeljem pravila ≥ 60 % rel + < 30 % tour = religijski; ≤ 30 % rel + ≥ 60 % tour = turistički; ostali = mješoviti / neodređeno. Podebljano: memorijalne teme razmatrane u §4.3."
+  ) |>
+  cols_align(align = "right", columns = c("*N*","pct~rel~ (%)","pct~tour~ (%)","Čistoća (%)")) |>
+  fmt_markdown(columns = c("Tema","FREX-vrh (top-5)"))
+```
+
+# Decizijska vrata pipeline-a
+
+Sve faze analize završavaju eksplicitnim decizijskim vratima koja izvještavaju status PASS, CAUTION ili FAIL za skup unaprijed definiranih provjera kvalitete. Sažeti pregled stanja decizijskih vrata po fazama:
+
+| Faza                       | Provjera                                | Status   | Napomena |
+|----------------------------|-----------------------------------------|----------|----------|
+| 02c (uokvirivanje)         | hi-kvadrat značajnost                   | PASS     | *p* < 0,001 |
+| 02c                        | minimalna učestalost ćelije             | PASS     | sve ćelije ≥ 5 |
+| 02c                        | memorijalni registar aktivan            | PASS     | 15,1 % korpusa |
+| 02c                        | dest_type_cat prisutan                  | PASS     | nema NA vrijednosti |
+| 02g (vremenski trend)      | model konvergiran                       | PASS     | OLS s FE destinacije |
+| 02g                        | year_num efekt prisutan                 | NEUTRALAN | β = −0,002, *p* = 0,94 |
+| 03a (STM)                  | konvergencija                           | PASS     | 95 EM iteracija |
+| 03a                        | bez raspada tema                        | PASS     | sve teme ≥ 1 % udjela |
+| 03a                        | bez dominantne teme                     | PASS     | sve teme ≤ 30 % udjela |
+| 03a                        | minimalna čistoća tema                  | CAUTION  | 36,9 % (T23, ninski klaster) |
+| 03a                        | slaganje s rječničkim okvirima          | PASS     | 54,6 % (prag 50 %) |
+| 03a                        | pokrivenost korpusa                     | PASS     | 100,0 % |
+
+: Status decizijskih vrata po fazama analize. {#tbl-gates}
+
+# Reproducibilnost
+
+Sve su statističke analize provedene u R-u verzije 4.5.2; STM model procijenjen je paketom `stm` (verzija 1.7.4), multinomijalna regresija paketom `nnet` (verzija 7.3-19), kontingencijska analiza paketom `vcd`. Sjeme generatora slučajnih brojeva postavljeno je na 2026 prije svake stohastičke procedure. Korpus i sve izvedene tablice pohranjeni su uz puni audit-trail (kontrolne sume, vremenska oznaka, popis paketa) u snimcima metapodataka u `output/metadata/` svake faze; trenutni snimak Phase 3a STM-a je `meta_03a_stm_framing_20260428.rds` (timestamp 2026-04-28 09:12:03).

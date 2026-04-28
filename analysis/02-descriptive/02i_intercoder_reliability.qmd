@@ -1,0 +1,192 @@
+---
+title: "Phase 2i: Intercoder Reliability"
+subtitle: "Two-pass: generate coding sheets (Pass 1), compute kappa (Pass 2)"
+author: "DigiKat Destination Framing Sub-study"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    theme: cosmo
+    self-contained: true
+execute:
+  warning: false
+  message: false
+  eval: true
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(data.table)
+library(stringi)
+
+for (d in c("../../validation/intercoder", "output/tables")) {
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+}
+```
+
+# Design
+
+Two-pass structure. **Pass 1** generates stratified coding sheets and halts.
+**Pass 2** runs automatically once both coder sheets are returned and saved to
+`validation/intercoder/`.
+
+Valid frame values for coders:
+`religious_only | tourism_only | religious_tourism_mixed | memorial_only | religious_memorial | scandal | other`
+
+---
+
+# Pass 1: Generate Coding Sheets
+
+```{r}
+#| label: pass1
+
+pass2_ready <- file.exists("../../validation/intercoder/coding_sheet_coder1.csv") &&
+              file.exists("../../validation/intercoder/coding_sheet_coder2.csv") &&
+              file.exists("../../validation/intercoder/auto_coded.csv")
+
+if (!pass2_ready) {
+  long <- readRDS("data/destinations_analytical_final.rds")
+  setDT(long)
+
+  set.seed(2026L)
+  sample_dt <- long[, .SD[sample(.N, min(20L, .N))], by = destination]
+
+  coding_sheet <- sample_dt[, .(
+    article_id   = pair_id,
+    destination,
+    title        = TITLE,
+    snippet      = MENTION_SNIPPET,
+    coder_frame  = NA_character_
+  )]
+
+  fwrite(coding_sheet,
+         "../../validation/intercoder/coding_sheet_coder1.csv",
+         bom = TRUE)
+  fwrite(coding_sheet,
+         "../../validation/intercoder/coding_sheet_coder2.csv",
+         bom = TRUE)
+
+  auto_coded <- sample_dt[, .(
+    article_id = pair_id,
+    destination,
+    auto_frame = dominant_frame
+  )]
+  fwrite(auto_coded, "../../validation/intercoder/auto_coded.csv")
+
+  cat("Pass 1 complete.\n")
+  cat("  Sample size:", nrow(coding_sheet), "articles\n")
+  cat("  Coding sheets written to validation/intercoder/\n\n")
+  cat("Next steps:\n")
+  cat("  1. Give coding_sheet_coder1.csv to Coder 1\n")
+  cat("  2. Give coding_sheet_coder2.csv to Coder 2\n")
+  cat("  3. Ask coders to fill in the coder_frame column\n")
+  cat("  4. Return filled sheets to validation/intercoder/\n")
+  cat("  5. Re-render this script to run Pass 2\n\n")
+  cat("Valid frame values:\n")
+  cat("  religious_only | tourism_only | religious_tourism_mixed\n")
+  cat("  memorial_only | religious_memorial | scandal | other\n")
+
+  knitr::knit_exit()
+}
+```
+
+---
+
+# Pass 2: Compute Reliability
+
+```{r}
+#| label: pass2-load
+
+# requires irr package: install.packages("irr")
+library(irr)
+
+c1   <- fread("../../validation/intercoder/coding_sheet_coder1.csv")
+c2   <- fread("../../validation/intercoder/coding_sheet_coder2.csv")
+auto <- fread("../../validation/intercoder/auto_coded.csv")
+
+setnames(c1,   "coder_frame", "frame_c1")
+setnames(c2,   "coder_frame", "frame_c2")
+
+merged <- merge(
+  c1[, .(article_id, frame_c1)],
+  c2[, .(article_id, frame_c2)],
+  by = "article_id"
+)
+merged <- merge(merged, auto[, .(article_id, auto_frame)], by = "article_id")
+
+cat("Merged", nrow(merged), "coded articles\n")
+```
+
+```{r}
+#| label: coder-coder-kappa
+
+kappa_c1c2 <- irr::kappa2(merged[, .(frame_c1, frame_c2)])
+cat("Coder 1 vs Coder 2 kappa:", round(kappa_c1c2$value, 3), "\n")
+cat("  n =", kappa_c1c2$n, "\n")
+```
+
+```{r}
+#| label: auto-vs-human-kappa
+
+merged[, frame_human := fifelse(frame_c1 == frame_c2, frame_c1, NA_character_)]
+merged_agreed <- merged[!is.na(frame_human)]
+
+cat("Agreed cases:", nrow(merged_agreed), "of", nrow(merged),
+    "(", round(nrow(merged_agreed) / nrow(merged) * 100, 1), "%)\n")
+
+kappa_auto <- irr::kappa2(merged_agreed[, .(frame_auto, frame_human)])
+cat("Auto vs human kappa (agreed cases):", round(kappa_auto$value, 3), "\n")
+```
+
+```{r}
+#| label: disagreements
+
+disagree <- merged[frame_c1 != frame_c2, .(
+  article_id,
+  destination,
+  snippet    = stri_sub(snippet, 1, 120),
+  frame_c1,
+  frame_c2,
+  auto_frame
+)]
+cat("Disagreements:", nrow(disagree), "\n")
+fwrite(disagree, "../../validation/intercoder/disagreements.csv", bom = TRUE)
+```
+
+```{r}
+#| label: save-kappa
+
+kappa_summary <- data.table(
+  comparison = c("coder1_vs_coder2", "auto_vs_human"),
+  kappa      = c(kappa_c1c2$value, kappa_auto$value),
+  n          = c(kappa_c1c2$n, nrow(merged_agreed))
+)
+print(kappa_summary)
+fwrite(kappa_summary, "output/tables/02i_intercoder_kappa.csv")
+```
+
+# Decision Gate
+
+```{r}
+#| label: decision-gate
+
+cat(strrep("=", 60), "\n")
+cat("DECISION GATE 2i\n")
+cat(strrep("=", 60), "\n\n")
+
+checks <- list(
+  kappa_c1c2_acceptable = kappa_c1c2$value >= 0.6,
+  kappa_auto_acceptable = kappa_auto$value >= 0.6,
+  agreement_rate_ok     = nrow(merged_agreed) / nrow(merged) >= 0.7,
+  kappa_saved           = file.exists("output/tables/02i_intercoder_kappa.csv")
+)
+
+for (nm in names(checks)) {
+  cat(nm, ":", ifelse(checks[[nm]], "PASS", "REVIEW"), "\n")
+}
+cat(strrep("=", 60), "\n")
+```

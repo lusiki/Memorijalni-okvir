@@ -1,0 +1,11 @@
+event_id,event_name,destination,date_type,date_fixed,date_variable_rule,window_days_pre,window_days_post
+1,Velika Gospa,ALL,fixed,08-15,,7,7
+2,Sinjska alka,Sinj,fixed,08-01,,7,7
+3,Mala Gospa,ALL,fixed,09-08,,5,5
+4,Blagdan Predragocjene Krvi,Ludbreg,fixed,09-01,,7,7
+5,Uskrs,ALL,variable,,easter_sunday,7,7
+6,Tijelovo,ALL,variable,,corpus_christi,5,5
+7,Duhovi,ALL,variable,,pentecost,5,5
+8,Gospa od Zečeva,Nin,fixed,05-05,,5,5
+9,Gospa od Otoka,Solin,fixed,09-08,,5,5
+10,Gospa Trsatska,Trsat,fixed,05-10,,5,5

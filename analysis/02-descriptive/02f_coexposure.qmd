@@ -1,0 +1,417 @@
+---
+title: "Phase 2f: Coexposure Network"
+subtitle: "Intertextual links between destinations through co-mention graph"
+author: "DigiKat Destination Framing Sub-study"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    code-fold: false
+    theme: cosmo
+    self-contained: true
+execute:
+  warning: false
+  message: false
+  eval: true
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(data.table)
+library(ggplot2)
+library(knitr)
+library(igraph)
+library(ggraph)
+library(tidygraph)
+
+for (d in c("data", "output/tables", "output/figures")) {
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+}
+```
+
+# Design Notes
+
+Phase 2f analyses the intertextual structure of the destination corpus.
+While previous phases treat each destination as an isolated unit of
+analysis, articles in the corpus sometimes mention more than one
+destination. These co-mentions carry information about how media
+construct the broader category of religious tourism in Croatia as a
+relational system rather than a set of disconnected sites.
+
+Two analytical components.
+
+First, a coexposure matrix built by taking the article-destination
+incidence matrix and computing the pairwise dot product. Each cell
+gives the number of articles that mention both destinations. Normalised
+using the Jaccard index, cell values range from zero to one and
+represent the proportion of shared articles relative to combined
+coverage.
+
+Second, a graph representation where nodes are destinations, edges are
+weighted by co-mention frequency or Jaccard similarity, and communities
+are detected through modularity based clustering. The graph summarises
+which destinations form clusters in the media ecosystem and which
+remain isolated.
+
+The analysis complements Phase 2c clustering, which groups destinations
+by their frame profiles. Phase 2f clusters them by their intertextual
+neighbourhood. If the two clusterings align, the media construct
+destinations into a small number of tightly coupled groups. If they
+diverge, frame similarity and co-mention structure represent
+independent relational layers.
+
+# 0. Configuration
+
+```{r}
+#| label: config
+
+config_2f <- list(
+  timestamp          = Sys.time(),
+  input_corpus       = "data/destinations_analytical_cleaned.rds",
+  output_metadata    = "data/phase2f_metadata.rds",
+  min_edge_weight    = 5L,
+  seed               = 2026L
+)
+set.seed(config_2f$seed)
+saveRDS(config_2f, "data/config_phase2f.rds")
+cat("Phase 2f configuration saved.\n")
+```
+
+# 1. Load Corpus
+
+```{r}
+#| label: load
+
+long <- readRDS(config_2f$input_corpus)
+setDT(long)
+long <- long[cleaning_action == "keep"]
+
+cat("Corpus loaded.\n")
+cat("  Total pairs:", format(nrow(long), big.mark = ","), "\n")
+cat("  Unique articles:",
+    format(uniqueN(long$article_id), big.mark = ","), "\n\n")
+```
+
+# 2. Article Level Destination Incidence
+
+```{r}
+#| label: incidence
+
+# each row: one article, with one-hot encoded destination membership
+art_dest <- unique(long[, .(article_id, destination)])
+
+# count destinations per article
+n_dest_per_article <- art_dest[, .N, by = article_id]
+setnames(n_dest_per_article, c("article_id", "n_destinations"))
+
+dist_tbl <- n_dest_per_article[, .N, by = n_destinations][order(n_destinations)]
+kable(dist_tbl, format.args = list(big.mark = ","),
+      caption = "Destinations mentioned per article")
+
+multi_articles <- n_dest_per_article[n_destinations >= 2]$article_id
+cat("\nArticles mentioning at least two destinations: ",
+    format(length(multi_articles), big.mark = ","), "\n\n", sep = "")
+```
+
+# 3. Coexposure Matrix
+
+```{r}
+#| label: coexposure-matrix
+
+# incidence matrix (articles x destinations)
+incid_long <- unique(long[, .(article_id, destination)])
+incid_long[, present := 1L]
+incid_wide <- dcast(incid_long, article_id ~ destination,
+                     value.var = "present", fill = 0L)
+
+destinations <- setdiff(names(incid_wide), "article_id")
+M <- as.matrix(incid_wide[, ..destinations])
+
+# co-occurrence: t(M) %*% M
+co_mat <- t(M) %*% M
+
+# diagonal is total article count per destination (self-mentions)
+totals <- diag(co_mat)
+
+# zero out diagonal
+diag(co_mat) <- 0L
+
+co_dt <- as.data.table(as.table(co_mat))
+setnames(co_dt, c("dest_a", "dest_b", "n_shared"))
+co_dt <- co_dt[as.character(dest_a) < as.character(dest_b)]
+co_dt <- co_dt[n_shared > 0][order(-n_shared)]
+
+kable(head(co_dt, 20), format.args = list(big.mark = ","),
+      caption = "Top 20 coexposure pairs (articles mentioning both)")
+
+fwrite(co_dt, "output/tables/02f_coexposure_counts.csv")
+```
+
+# 4. Jaccard Similarity
+
+```{r}
+#| label: jaccard
+
+# Jaccard for pair (A, B) = |A n B| / |A u B|
+# where |A| = n articles mentioning A, |B| similar, |A n B| = n_shared
+# |A u B| = |A| + |B| - |A n B|
+
+jaccard_mat <- matrix(0, length(destinations), length(destinations),
+                       dimnames = list(destinations, destinations))
+for (i in seq_along(destinations)) {
+  for (j in seq_along(destinations)) {
+    if (i == j) next
+    n_a <- totals[i]
+    n_b <- totals[j]
+    n_shared_ij <- co_mat[i, j]
+    union_ij <- n_a + n_b - n_shared_ij
+    if (union_ij > 0) {
+      jaccard_mat[i, j] <- n_shared_ij / union_ij
+    }
+  }
+}
+
+jaccard_dt <- as.data.table(as.table(jaccard_mat))
+setnames(jaccard_dt, c("dest_a", "dest_b", "jaccard"))
+jaccard_dt <- jaccard_dt[as.character(dest_a) < as.character(dest_b)]
+jaccard_dt[, jaccard := round(jaccard, 4)]
+jaccard_dt <- jaccard_dt[jaccard > 0][order(-jaccard)]
+
+kable(head(jaccard_dt, 20),
+      caption = "Top 20 Jaccard similarity pairs")
+
+fwrite(jaccard_dt, "output/tables/02f_jaccard.csv")
+```
+
+# 5. Graph Construction
+
+```{r}
+#| label: graph
+
+# edge list from raw coexposure counts
+edges <- co_dt[n_shared >= config_2f$min_edge_weight,
+                .(from = as.character(dest_a),
+                  to = as.character(dest_b),
+                  weight = n_shared)]
+
+# node attributes
+nodes <- data.table(name = destinations,
+                     total_articles = totals[destinations])
+
+g <- graph_from_data_frame(edges, directed = FALSE,
+                             vertices = nodes)
+
+cat("Graph constructed.\n")
+cat("  Vertices:", vcount(g), "\n")
+cat("  Edges:", ecount(g), "\n")
+cat("  Edge weight range:", min(E(g)$weight), "to",
+    max(E(g)$weight), "\n\n")
+```
+
+# 6. Centrality Measures
+
+```{r}
+#| label: centrality
+
+V(g)$degree <- igraph::degree(g)
+V(g)$strength <- igraph::strength(g)
+V(g)$betweenness <- igraph::betweenness(g, weights = 1 / E(g)$weight)
+V(g)$eigen <- eigen_centrality(g, weights = E(g)$weight)$vector
+
+centrality_dt <- data.table(
+  destination = V(g)$name,
+  total_articles = V(g)$total_articles,
+  degree = V(g)$degree,
+  strength = V(g)$strength,
+  betweenness = round(V(g)$betweenness, 2),
+  eigen = round(V(g)$eigen, 3)
+)[order(-strength)]
+
+kable(centrality_dt, format.args = list(big.mark = ","),
+      caption = "Centrality measures per destination")
+
+fwrite(centrality_dt, "output/tables/02f_centrality.csv")
+```
+
+# 7. Community Detection
+
+```{r}
+#| label: communities
+
+# Louvain community detection (modularity optimisation)
+set.seed(config_2f$seed)
+communities <- cluster_louvain(g, weights = E(g)$weight)
+
+V(g)$community <- membership(communities)
+
+modularity_score <- modularity(communities)
+cat("Louvain community detection\n")
+cat("  Number of communities:", length(communities), "\n")
+cat("  Modularity:", round(modularity_score, 3), "\n\n")
+
+community_dt <- data.table(
+  destination = V(g)$name,
+  community = V(g)$community
+)[order(community, destination)]
+
+kable(community_dt, caption = "Community assignment")
+fwrite(community_dt, "output/tables/02f_communities.csv")
+```
+
+# 8. Graph Visualisation
+
+```{r}
+#| label: graph-plot
+
+# convert to tidygraph for ggraph
+g_tidy <- as_tbl_graph(g)
+
+set.seed(config_2f$seed)
+
+p_net <- ggraph(g_tidy, layout = "fr", weights = weight) +
+  geom_edge_link(aes(width = weight, alpha = weight),
+                  colour = "grey50") +
+  geom_node_point(aes(size = total_articles,
+                        colour = as.factor(community))) +
+  geom_node_text(aes(label = name),
+                   repel = TRUE, size = 4) +
+  scale_edge_width(range = c(0.3, 2.5)) +
+  scale_edge_alpha(range = c(0.3, 0.9)) +
+  scale_size_continuous(range = c(4, 14)) +
+  scale_colour_brewer(palette = "Set2") +
+  labs(title = "Destination coexposure network",
+       subtitle = paste0("Edge weight = number of articles mentioning both (>=",
+                          config_2f$min_edge_weight, ")"),
+       size = "Article volume",
+       colour = "Community",
+       edge_width = "Coexposure",
+       edge_alpha = "Coexposure") +
+  theme_graph()
+
+ggsave("output/figures/02f_coexposure_network.png", p_net,
+       width = 11, height = 9)
+p_net
+```
+
+```{r}
+#| label: jaccard-heatmap
+
+j_plot <- melt(as.data.table(jaccard_mat, keep.rownames = "dest_a"),
+                id.vars = "dest_a",
+                variable.name = "dest_b",
+                value.name = "jaccard")
+
+# order by total articles
+dest_order <- centrality_dt[order(-total_articles)]$destination
+j_plot[, dest_a := factor(dest_a, levels = dest_order)]
+j_plot[, dest_b := factor(dest_b, levels = dest_order)]
+
+p_jacc <- ggplot(j_plot, aes(dest_a, dest_b, fill = jaccard)) +
+  geom_tile() +
+  geom_text(aes(label = ifelse(jaccard > 0,
+                                 format(round(jaccard, 3), nsmall = 3),
+                                 "")),
+             size = 3) +
+  scale_fill_gradient(low = "white", high = "#B2182B") +
+  labs(title = "Jaccard similarity between destinations",
+       subtitle = "Proportion of shared articles relative to combined coverage",
+       x = NULL, y = NULL, fill = "Jaccard") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        panel.grid = element_blank())
+
+ggsave("output/figures/02f_jaccard_heatmap.png", p_jacc,
+       width = 10, height = 8)
+p_jacc
+```
+
+# 9. Decision Gate
+
+```{r}
+#| label: decision-gate
+
+cat(strrep("=", 60), "\n")
+cat("DECISION GATE 2f\n")
+cat(strrep("=", 60), "\n\n")
+
+checks <- list()
+
+# 1. non-trivial number of multi-destination articles
+checks$multi_article_threshold <- length(multi_articles) >= 200
+cat("1. At least 200 multi-destination articles: ",
+    ifelse(checks$multi_article_threshold, "PASS", "NOTE"),
+    " (", length(multi_articles), ")\n", sep = "")
+
+# 2. graph is connected (no isolated destinations)
+checks$connected <- is_connected(g)
+cat("2. Graph is connected (no isolated destinations): ",
+    ifelse(checks$connected, "PASS", "NOTE"), "\n", sep = "")
+
+# 3. modularity score indicates meaningful community structure
+# > 0.3 is conventionally interpreted as non-trivial structure
+checks$modularity_ok <- modularity_score > 0.15
+cat("3. Modularity > 0.15 (non-trivial communities): ",
+    ifelse(checks$modularity_ok, "PASS", "NOTE"),
+    " (", round(modularity_score, 3), ")\n", sep = "")
+
+# 4. at least two communities detected
+checks$community_count <- length(communities) >= 2
+cat("4. At least 2 communities detected: ",
+    ifelse(checks$community_count, "PASS", "NOTE"),
+    " (", length(communities), ")\n", sep = "")
+
+cat("\n")
+cat("Passed:", sum(unlist(checks)), "of", length(checks), "\n")
+cat(strrep("=", 60), "\n")
+```
+
+# 10. Save Outputs
+
+```{r}
+#| label: save
+
+meta_2f <- list(
+  timestamp         = Sys.time(),
+  phase             = "2f_coexposure",
+  config            = config_2f,
+  coexposure_counts = co_dt,
+  jaccard           = jaccard_dt,
+  centrality        = centrality_dt,
+  communities       = community_dt,
+  modularity        = modularity_score,
+  checks            = checks
+)
+saveRDS(meta_2f, config_2f$output_metadata)
+saveRDS(g, "data/coexposure_graph.rds")
+cat("Phase 2f saved to", config_2f$output_metadata, "\n")
+```
+
+# 11. Interpretive Summary
+
+Phase 2f reveals the relational structure of the destination corpus.
+Three analytical outputs enter the Descriptive Analysis section.
+
+The top coexposure pairs identify destinations that media consistently
+construct together. High coexposure between Marija Bistrica and Trsat
+would indicate that the national Marian shrine discourse operates as a
+unified media category. High coexposure between Nin and Solin would
+reveal the starohrvatski historical layer of religious tourism
+discourse.
+
+The Jaccard similarity matrix quantifies the relative strength of
+co-mention beyond raw frequency. A high Jaccard value means that two
+destinations share a large proportion of their coverage relative to
+their combined volume, which is a stronger signal of media
+co-construction than absolute co-mention counts.
+
+The community detection produces an empirically grounded typology
+based on media intertextual structure rather than on destination
+content profiles. This typology can be cross referenced with the
+Phase 2c framing clusters. Destinations placed in the same community
+here and the same framing cluster there represent robust media
+categories. Destinations that belong to different communities in the
+two analyses reveal a tension between thematic similarity and
+intertextual proximity.

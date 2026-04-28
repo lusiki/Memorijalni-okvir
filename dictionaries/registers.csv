@@ -1,0 +1,5 @@
+register,keyword_pattern,description
+religious,svetišt|crkv|hodočašć|molitv|misa|biskup|svećenik|vjernič|blagoslov|relikvij|zaštitni|propovijed|sakrament|liturgij|duhovn|marijansko|gospin|pobožn|krunic|procesij|hodočasn|zavjetn|patrona|blagoslav,Religious register keywords (Croatian root patterns)
+tourism,turiz|turističk|posjetitelj|smještaj|hotel|apartman|destinacij|putovanj|izlet|vodič|atrakcij|sezon|gost|booking|overnight,Tourism register keywords
+scandal,skandal|afer|korupcij|pronevjer|kriminal|pljačk|prevar|uhićen|pedofil|zlostavlj|zloporab|optužnic|istražni zatvor,Scandal register — clergy and institutional misconduct only (excludes traffic accidents and routine court)
+memorial,domovinsk\w* rat\w*|žrtv\w+|branitelj\w+|godišnjic\w*|masakr\w*|zločin\w*|pokolj\w*|komemoracij\w*|obljetnic\w*.*rat|sjećanj\w*.*rata,War commemoration and martyrdom memorial register

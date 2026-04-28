@@ -1,0 +1,409 @@
+---
+title: "Phase 2e: Per-Platform Framing Decomposition"
+subtitle: "Is destination framing platform-invariant or platform-mediated"
+author: "DigiKat Destination Framing Sub-study"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    code-fold: false
+    theme: cosmo
+    self-contained: true
+execute:
+  warning: false
+  message: false
+  eval: true
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(data.table)
+library(ggplot2)
+library(knitr)
+library(patchwork)
+
+for (d in c("data", "output/tables", "output/figures")) {
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+}
+```
+
+# Design Notes
+
+Phase 2e tests whether the framing patterns identified in Phase 2c are
+stable across platforms or mediated by platform specific editorial
+logics. The analytical corpus is dominated by web portals (about 80
+percent of pairs), but Facebook, Twitter and YouTube together carry a
+non trivial share. If the framing profile of a destination differs
+substantially between platforms, the Phase 2c aggregate analysis hides
+platform specific signal and the conclusions need platform qualifiers.
+If the framing profile is stable across platforms, destination identity
+dominates platform identity and the aggregate analysis holds.
+
+Two analytical components.
+
+First, per platform framing distributions per destination, with chi
+squared tests computed within each platform. This establishes whether
+the destination by frame relationship remains statistically significant
+within each platform separately.
+
+Second, platform shift analysis per destination, computing total
+variation distance between platform profiles. Destinations with low
+shift have stable framing across platforms, destinations with high
+shift have platform mediated framing.
+
+# 0. Configuration
+
+```{r}
+#| label: config
+
+config_2e <- list(
+  timestamp          = Sys.time(),
+  input_corpus       = "data/destinations_analytical_cleaned.rds",
+  output_metadata    = "data/phase2e_metadata.rds",
+  min_platform_pairs = 500L,
+  min_dest_platform_pairs = 50L,
+  seed = 2026L
+)
+set.seed(config_2e$seed)
+saveRDS(config_2e, "data/config_phase2e.rds")
+cat("Phase 2e configuration saved.\n")
+```
+
+# 1. Load Corpus
+
+```{r}
+#| label: load
+
+long <- readRDS(config_2e$input_corpus)
+setDT(long)
+long <- long[cleaning_action == "keep"]
+
+cat("Corpus loaded.\n")
+cat("  Total pairs:", format(nrow(long), big.mark = ","), "\n\n")
+
+if (!"dominant_frame" %in% names(long)) {
+  stop("dominant_frame column missing. Run Phase 2c first.")
+}
+```
+
+# 2. Platform Inventory
+
+```{r}
+#| label: platform-inventory
+
+platform_counts <- long[, .N, by = SOURCE_TYPE][order(-N)]
+platform_counts[, pct := round(N / sum(N) * 100, 1)]
+kable(platform_counts, format.args = list(big.mark = ","),
+      caption = "Pairs per platform")
+
+main_platforms <- platform_counts[N >= config_2e$min_platform_pairs
+                                    ]$SOURCE_TYPE
+cat("\nPlatforms retained for analysis (>= ",
+    config_2e$min_platform_pairs, " pairs):\n  ",
+    paste(main_platforms, collapse = ", "), "\n", sep = "")
+
+long_main <- long[SOURCE_TYPE %in% main_platforms]
+cat("\nCorpus restricted to main platforms: ",
+    format(nrow(long_main), big.mark = ","), " pairs\n", sep = "")
+```
+
+# 3. Frame Distribution Per Platform
+
+```{r}
+#| label: per-platform-dist
+
+# focus on the three main frames used in Phase 2c multinomial
+main_frames <- c("religious_only", "religious_tourism_mixed",
+                  "tourism_only")
+
+long_main_frames <- long_main[dominant_frame %in% main_frames]
+
+platform_frame_tbl <- long_main_frames[,
+  .N, by = .(SOURCE_TYPE, destination, dominant_frame)]
+
+# total per platform-destination
+platform_frame_tbl[, total := sum(N),
+                    by = .(SOURCE_TYPE, destination)]
+platform_frame_tbl[, pct := round(N / total * 100, 1)]
+
+# display one table per platform
+for (p in main_platforms) {
+  sub_wide <- dcast(platform_frame_tbl[SOURCE_TYPE == p],
+                     destination ~ dominant_frame,
+                     value.var = "pct", fill = 0)
+  cat("\n\n## Platform", p, "\n\n")
+  print(kable(sub_wide,
+              caption = paste("Frame distribution (%) on", p)))
+}
+
+fwrite(platform_frame_tbl, "output/tables/02e_per_platform_frames.csv")
+```
+
+# 4. Chi Squared Test Per Platform
+
+```{r}
+#| label: per-platform-chi
+
+chi_by_platform <- list()
+
+for (p in main_platforms) {
+  sub <- long_main_frames[SOURCE_TYPE == p]
+  mat <- dcast(sub[, .N, by = .(destination, dominant_frame)],
+                destination ~ dominant_frame,
+                value.var = "N", fill = 0L)
+
+  dest_vec <- mat$destination
+  mat_m <- as.matrix(mat[, -"destination"])
+  rownames(mat_m) <- dest_vec
+
+  # drop destinations with zero counts on all frames (safety)
+  keep_rows <- rowSums(mat_m) >= config_2e$min_dest_platform_pairs
+  if (sum(keep_rows) < 3) {
+    cat("Platform", p,
+        "has fewer than 3 destinations with sufficient data; skipping chi-sq.\n")
+    next
+  }
+  mat_m <- mat_m[keep_rows, , drop = FALSE]
+
+  chi <- chisq.test(mat_m)
+
+  n_total <- sum(mat_m)
+  k <- min(nrow(mat_m), ncol(mat_m))
+  cramers_v <- sqrt(unname(chi$statistic) / (n_total * (k - 1)))
+
+  chi_by_platform[[p]] <- list(
+    platform   = p,
+    n_pairs    = sum(mat_m),
+    n_dest     = nrow(mat_m),
+    chi_sq     = unname(chi$statistic),
+    df         = chi$parameter,
+    p_value    = chi$p.value,
+    cramers_v  = cramers_v
+  )
+}
+
+chi_summary <- rbindlist(lapply(chi_by_platform, as.data.table))
+chi_summary[, chi_sq := round(chi_sq, 1)]
+chi_summary[, cramers_v := round(cramers_v, 3)]
+chi_summary[, significant := p_value < 0.001]
+
+kable(chi_summary, format.args = list(big.mark = ","),
+      caption = "Chi squared test of frame by destination, within each platform")
+
+fwrite(chi_summary, "output/tables/02e_chi_by_platform.csv")
+```
+
+# 5. Platform Shift Per Destination
+
+For each destination, compare framing profile across platforms. Total
+variation distance (TVD) measures how different two probability
+distributions are. TVD = 0 means identical profile, TVD = 1 means
+completely disjoint. Summary statistic per destination is the maximum
+pairwise TVD across platforms.
+
+```{r}
+#| label: platform-shift
+
+# destination-platform profile matrix: pct of each frame per (dest, platform)
+profile_wide <- dcast(platform_frame_tbl,
+                       destination + SOURCE_TYPE ~ dominant_frame,
+                       value.var = "pct", fill = 0)
+
+# replace NA with 0 and keep only destinations present on all main platforms
+dest_platform_coverage <- profile_wide[, .(n_platforms = .N),
+                                         by = destination]
+dest_all_platforms <- dest_platform_coverage[n_platforms == length(main_platforms)
+                                              ]$destination
+
+profile_valid <- profile_wide[destination %in% dest_all_platforms]
+
+cat("Destinations present on all main platforms:\n")
+cat("  ", paste(dest_all_platforms, collapse = ", "), "\n\n")
+
+# compute pairwise TVD for each destination across platforms
+tvd_results <- list()
+
+for (d in dest_all_platforms) {
+  sub_prof <- profile_valid[destination == d]
+  mat_prof <- as.matrix(sub_prof[, c("religious_only",
+                                       "religious_tourism_mixed",
+                                       "tourism_only")])
+  rownames(mat_prof) <- sub_prof$SOURCE_TYPE
+
+  # normalise each row to sum to 1
+  mat_prof <- mat_prof / rowSums(mat_prof)
+
+  # pairwise TVD
+  n_p <- nrow(mat_prof)
+  tvd_mat <- matrix(0, n_p, n_p,
+                     dimnames = list(rownames(mat_prof),
+                                      rownames(mat_prof)))
+  for (i in 1:n_p) {
+    for (j in 1:n_p) {
+      tvd_mat[i, j] <- 0.5 * sum(abs(mat_prof[i, ] - mat_prof[j, ]))
+    }
+  }
+
+  tvd_results[[d]] <- list(
+    destination     = d,
+    tvd_matrix      = tvd_mat,
+    mean_tvd        = mean(tvd_mat[upper.tri(tvd_mat)]),
+    max_tvd         = max(tvd_mat)
+  )
+}
+
+tvd_summary <- rbindlist(lapply(tvd_results, function(x)
+  data.table(destination = x$destination,
+              mean_tvd = round(x$mean_tvd, 3),
+              max_tvd = round(x$max_tvd, 3))))
+tvd_summary <- tvd_summary[order(-mean_tvd)]
+
+tvd_summary[, stability := fcase(
+  max_tvd < 0.10, "stable",
+  max_tvd < 0.25, "moderate shift",
+  default = "large shift"
+)]
+
+kable(tvd_summary,
+      caption = "Platform shift per destination (total variation distance)")
+fwrite(tvd_summary, "output/tables/02e_platform_shift.csv")
+```
+
+# 6. Visualisation
+
+```{r}
+#| label: plot-frame-grid
+
+long_main_frames[, destination := factor(destination,
+  levels = long_main_frames[, .N,
+                             by = destination][order(-N)]$destination)]
+
+plot_data <- long_main_frames[, .N,
+                                by = .(SOURCE_TYPE, destination, dominant_frame)]
+plot_data[, total := sum(N), by = .(SOURCE_TYPE, destination)]
+plot_data[, pct := N / total * 100]
+
+p_grid <- ggplot(plot_data,
+                  aes(destination, pct, fill = dominant_frame)) +
+  geom_col() +
+  facet_wrap(~ SOURCE_TYPE, ncol = 2) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Frame composition by destination and platform",
+       x = NULL, y = "Percent of pairs", fill = "Frame") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        legend.position = "bottom")
+
+ggsave("output/figures/02e_frame_grid_by_platform.png", p_grid,
+       width = 13, height = 9)
+p_grid
+```
+
+```{r}
+#| label: plot-shift
+
+p_shift <- ggplot(tvd_summary,
+                   aes(reorder(destination, mean_tvd),
+                       mean_tvd, fill = stability)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(values = c("stable" = "#4F8A4F",
+                                 "moderate shift" = "#F4A582",
+                                 "large shift" = "#B2182B")) +
+  geom_hline(yintercept = c(0.10, 0.25),
+             linetype = "dashed", colour = "grey50") +
+  labs(title = "Platform shift per destination",
+       subtitle = "Mean pairwise total variation distance across platforms",
+       x = NULL, y = "Mean TVD", fill = "Stability") +
+  theme_minimal()
+
+ggsave("output/figures/02e_platform_shift.png", p_shift,
+       width = 10, height = 6)
+p_shift
+```
+
+# 7. Decision Gate
+
+```{r}
+#| label: decision-gate
+
+cat(strrep("=", 60), "\n")
+cat("DECISION GATE 2e\n")
+cat(strrep("=", 60), "\n\n")
+
+checks <- list()
+
+# 1. at least three platforms met the minimum volume threshold
+checks$enough_platforms <- length(main_platforms) >= 3
+cat("1. At least 3 platforms with >= ",
+    config_2e$min_platform_pairs, " pairs: ",
+    ifelse(checks$enough_platforms, "PASS", "FAIL"),
+    " (", length(main_platforms), ")\n", sep = "")
+
+# 2. chi squared significant on at least the largest platform
+web_chi_sig <- chi_summary[platform == main_platforms[1]]$p_value < 0.001
+checks$main_platform_sig <- isTRUE(web_chi_sig)
+cat("2. Frame-by-destination significant on largest platform: ",
+    ifelse(checks$main_platform_sig, "PASS", "NOTE"), "\n", sep = "")
+
+# 3. at least one destination has mean TVD < 0.15 (stable)
+checks$some_stability <- any(tvd_summary$mean_tvd < 0.15)
+cat("3. At least one destination is platform stable (TVD < 0.15): ",
+    ifelse(checks$some_stability, "PASS", "NOTE"), "\n", sep = "")
+
+# 4. cross-platform TVD spans substantively meaningful range
+checks$tvd_range <- diff(range(tvd_summary$mean_tvd)) >= 0.05
+cat("4. TVD range across destinations >= 0.05: ",
+    ifelse(checks$tvd_range, "PASS", "NOTE"),
+    " (range = ", round(diff(range(tvd_summary$mean_tvd)), 3), ")\n", sep = "")
+
+cat("\n")
+cat("Passed:", sum(unlist(checks)), "of", length(checks), "\n")
+cat(strrep("=", 60), "\n")
+```
+
+# 8. Save Outputs
+
+```{r}
+#| label: save
+
+meta_2e <- list(
+  timestamp        = Sys.time(),
+  phase            = "2e_per_platform",
+  config           = config_2e,
+  platform_counts  = platform_counts,
+  main_platforms   = main_platforms,
+  chi_by_platform  = chi_summary,
+  tvd_summary      = tvd_summary,
+  tvd_results      = tvd_results,
+  checks           = checks
+)
+saveRDS(meta_2e, config_2e$output_metadata)
+cat("Phase 2e saved to", config_2e$output_metadata, "\n")
+```
+
+# 9. Interpretive Summary
+
+Phase 2e provides the platform invariance check for the Phase 2c
+framing analysis. The chi squared tests establish whether destination
+framing remains statistically structured within each platform
+separately. If all platform level chi squared tests are significant,
+the framing structure is not a statistical artefact of pooling across
+platforms.
+
+The TVD analysis quantifies how much each destination's frame profile
+changes across platforms. Low TVD destinations have consistent media
+identities regardless of channel. High TVD destinations have platform
+specific constructions, suggesting that social media audiences and
+portal audiences encounter different versions of the same site.
+
+Both outputs feed the Discursive Framing results section as a robustness
+subsection, titled provisionally *Platform Invariance of Framing
+Patterns*. The finding that framing structure holds within each
+platform strengthens the generalisability of the aggregate results. Any
+destination with particularly high TVD deserves narrative attention in
+the Discussion, since it reveals platform as an active mediator of
+meaning construction rather than a neutral channel.

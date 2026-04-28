@@ -1,0 +1,11 @@
+destination_id,destination_name,destination_type,dest_type_cat,requires_context_gate,latitude,longitude
+1,Marija Bistrica,marijansko svetište,nacionalno_marijansko,FALSE,46.0167,16.1167
+2,Trsat,marijansko svetište,nacionalno_marijansko,FALSE,45.3333,14.4500
+3,Sinj,marijansko svetište,nacionalno_marijansko,TRUE,43.7000,16.6333
+4,Aljmaš,marijansko svetište,lokalno_marijansko,FALSE,45.2833,18.7167
+5,Ludbreg,svetište Predragocjene Krvi Kristove,lokalno_marijansko,TRUE,46.2500,16.6167
+6,Krasno,marijansko svetište,lokalno_marijansko,TRUE,44.7833,15.0500
+7,Voćin,marijansko svetište,lokalno_marijansko,FALSE,45.6167,17.6667
+8,Vepric,marijansko svetište,lokalno_marijansko,FALSE,43.3833,16.9833
+9,Nin,svetište Gospe od Zečeva,nemarijansko,TRUE,44.2333,15.1833
+10,Solin,svetište Gospe od Otoka,nemarijansko,TRUE,43.5333,16.4833

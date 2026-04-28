@@ -1,0 +1,124 @@
+---
+title: "Phase XX: TITLE"
+author: "DigiKat"
+date: today
+format:
+  html:
+    toc: true
+    code-fold: true
+    code-summary: "Show code"
+execute:
+  warning: false
+  message: false
+---
+
+## 0 Configuration
+
+```{r config}
+# If config exists on disk, read it. Otherwise construct and save.
+config_path <- "PHASE_config.rds"
+
+if (file.exists(config_path)) {
+  config <- readRDS(config_path)
+} else {
+  config <- list(
+    phase_name    = "XX_phase_name",
+    seed          = 2025L,
+    input_paths   = c(
+      corpus = "../../data-raw/INPUTFILE.rds"
+    ),
+    output_paths  = c(
+      result = "../../data/OUTPUTFILE.rds"
+    ),
+    parameters    = list(
+      # Phase-specific parameters here
+    ),
+    dictionary_paths = c(
+      destinations = "../../dictionaries/destinations.csv",
+      registers    = "../../dictionaries/registers.csv"
+    )
+  )
+  saveRDS(config, config_path)
+}
+```
+
+## 1 Pattern architecture
+
+```{r patterns}
+# Load dictionaries, compile patterns
+```
+
+## 2 Connect
+
+```{r connect}
+# Database or file connections
+# source("../../R/connect_db.R")
+# con <- connect_db()
+```
+
+## 3 Query builder
+
+```{r query}
+# Construct SQL or filter expressions
+```
+
+## 4 Retrieve
+
+```{r retrieve}
+# Execute queries, extract data
+```
+
+## 5 Tag
+
+```{r tag}
+# Apply register or category tags
+```
+
+## 6 Aggregate
+
+```{r aggregate}
+# Build panels, summarise
+```
+
+## 7 Quality profile
+
+```{r quality}
+# Descriptive checks, distributions, anomaly detection
+```
+
+## 8 Decision gate
+
+```{r gate}
+# source("../../R/decision_gate.R")
+# Define checks and evaluate
+gate_results <- list(
+  # check_name = list(status = "PASS|FAIL|CAUTION", message = "details")
+)
+
+for (check in names(gate_results)) {
+  cat(sprintf("[%s] %s: %s\n",
+    gate_results[[check]]$status,
+    check,
+    gate_results[[check]]$message
+  ))
+}
+```
+
+## 9 Disconnect
+
+```{r disconnect}
+# DBI::dbDisconnect(con)
+```
+
+## 10 Save
+
+```{r save}
+# Write output files to typed directories
+```
+
+## 11 Metadata
+
+```{r metadata}
+# source("../../R/metadata_snapshot.R")
+# Build and save metadata snapshot to output/metadata/
+```

@@ -1,0 +1,20 @@
+project:
+  type: default
+
+format:
+  html:
+    toc: true
+    number-sections: true
+  pdf:
+    documentclass: article
+    papersize: a4
+    fontsize: 12pt
+    geometry: margin=2.5cm
+    number-sections: true
+  docx:
+    number-sections: true
+
+bibliography: references.bib
+csl: citation-style.csl
+
+lang: hr

@@ -1,0 +1,679 @@
+---
+title: "Phase 2b: Temporal Dynamics and Seasonality"
+subtitle: "Monthly decomposition, liturgical calendar overlay, seasonality test"
+author: "DigiKat Destination Framing Sub-study"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    code-fold: false
+    theme: cosmo
+    self-contained: true
+execute:
+  warning: false
+  message: false
+  eval: true
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(data.table)
+library(ggplot2)
+library(knitr)
+library(patchwork)
+library(forecast)
+
+for (d in c("data", "output/tables", "output/figures", "output/reports")) {
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+}
+```
+
+# Design Notes
+
+Phase 2b addresses the third research question: whether media coverage of
+religious tourism destinations clusters around liturgical events, or is
+distributed uniformly across the calendar.
+
+Four analytical components.
+
+1. Monthly volume time series per destination with trend and seasonal
+   components extracted via STL decomposition.
+2. Liturgical calendar map per destination, anchoring each destination to
+   its principal patronal feasts.
+3. Feast proximity analysis. For each destination, articles are labelled
+   by their distance to the nearest feast day. The distribution of
+   mentions across distance bins reveals whether coverage is feast
+   anchored or continuous.
+4. Seasonality index per destination, defined as the ratio of feast month
+   volume to non feast month volume. A large ratio signals event driven
+   coverage, a ratio near one signals continuous coverage.
+
+The analytical consequence for the research question is straightforward.
+Event anchored destinations function in the media as calendar ritual
+sites. Continuously covered destinations function as standing tourist
+destinations. This distinction is the empirical core of the third
+research question.
+
+# 0. Configuration
+
+```{r}
+#| label: config
+
+config_2b <- list(
+  timestamp        = Sys.time(),
+  input_corpus     = "data/destinations_analytical_cleaned.rds",
+  output_metadata  = "data/phase2b_metadata.rds",
+  feast_window_days = 14L,
+  dedup_by_cluster = FALSE,
+  min_months_for_stl = 24L
+)
+saveRDS(config_2b, "data/config_phase2b.rds")
+cat("Phase 2b configuration saved.\n")
+```
+
+# 1. Load Enriched Corpus
+
+```{r}
+#| label: load
+
+# fall back to plain analytical corpus if enriched is not available
+input_path <- config_2b$input_corpus
+if (!file.exists(input_path)) {
+  input_path <- "../01-retrieval/data-raw/destinations_analytical_clean.rds"
+  cat("Note: using plain analytical corpus, syndication weighting disabled.\n")
+}
+
+long <- readRDS(input_path)
+setDT(long)
+long <- long[cleaning_action == "keep"]
+
+if (!"yearmonth" %in% names(long))
+  long[, yearmonth := as.Date(format(date, "%Y-%m-01"))]
+if (!"cluster_size" %in% names(long)) long[, cluster_size := 1L]
+
+cat("Corpus loaded.\n")
+cat("  Rows:", format(nrow(long), big.mark = ","), "\n")
+cat("  Date range:", format(min(long$date)), "to",
+    format(max(long$date)), "\n\n")
+```
+
+# 2. Liturgical Calendar
+
+Feast dates that define the patronal calendar for each destination.
+Fixed date feasts are stored as month-day pairs. Movable feasts are
+excluded from the core overlay because they do not align reliably
+across years and their effect is better studied separately.
+
+```{r}
+#| label: liturgical-calendar
+
+# each entry is a list of feasts; a feast has a name and month-day
+liturgical_calendar <- list(
+
+  marija_bistrica = list(
+    list(name = "Velika Gospa",    mm = 8L, dd = 15L),
+    list(name = "Mala Gospa",      mm = 9L, dd = 8L),
+    list(name = "Rođenje Marijino u Bistrici", mm = 7L, dd = 13L)
+  ),
+
+  trsat = list(
+    list(name = "Translatio Trsat",  mm = 5L, dd = 10L),
+    list(name = "Velika Gospa",      mm = 8L, dd = 15L),
+    list(name = "Mala Gospa",        mm = 9L, dd = 8L)
+  ),
+
+  sinj = list(
+    list(name = "Velika Gospa Sinjska", mm = 8L, dd = 15L),
+    list(name = "Sinjska Alka",         mm = 8L, dd = 7L),
+    list(name = "Hodočasnička devetnica", mm = 8L, dd = 6L)
+  ),
+
+  aljmas = list(
+    list(name = "Mala Gospa",        mm = 9L, dd = 8L),
+    list(name = "Velika Gospa",      mm = 8L, dd = 15L)
+  ),
+
+  ludbreg = list(
+    list(name = "Sveta Nedjelja ludbreška", mm = 9L, dd = 1L),
+    list(name = "Svetkovina Presvete Krvi", mm = 9L, dd = 2L),
+    list(name = "Gospin rođendan (Mala Gospa)", mm = 9L, dd = 8L)
+  ),
+
+  krasno = list(
+    list(name = "Gospa od Krasna",   mm = 8L, dd = 15L),
+    list(name = "Svetkovina Krasnoga",mm = 7L, dd = 2L)
+  ),
+
+  vocin = list(
+    list(name = "Velika Gospa Voćinska", mm = 8L, dd = 15L),
+    list(name = "Mala Gospa",            mm = 9L, dd = 8L)
+  ),
+
+  vepric = list(
+    list(name = "Gospa Lurdska",     mm = 2L, dd = 11L),
+    list(name = "Velika Gospa",      mm = 8L, dd = 15L)
+  ),
+
+  nin = list(
+    list(name = "Gospa od Zečeva (svibanj)", mm = 5L, dd = 5L),
+    list(name = "Gospa od Zečeva (kolovoz)", mm = 8L, dd = 5L),
+    list(name = "Sveti Nikola Tavelić",      mm = 11L, dd = 14L)
+  ),
+
+  solin = list(
+    list(name = "Gospa od Otoka",    mm = 9L, dd = 12L),
+    list(name = "Gospa od Otoka (glavna)", mm = 9L, dd = 13L),
+    list(name = "Mala Gospa",        mm = 9L, dd = 8L)
+  )
+)
+
+# unpack to long data.table
+feast_dt <- rbindlist(lapply(names(liturgical_calendar), function(d) {
+  feasts <- liturgical_calendar[[d]]
+  rbindlist(lapply(feasts, function(f) {
+    data.table(destination = d, feast_name = f$name,
+                mm = f$mm, dd = f$dd)
+  }))
+}))
+
+# expand to actual calendar dates across analysis years
+years <- sort(unique(year(long$date)))
+feast_dates <- rbindlist(lapply(years, function(y) {
+  feast_dt[, .(destination, feast_name, mm, dd,
+                feast_date = as.Date(sprintf("%d-%02d-%02d", y, mm, dd)))]
+}))
+feast_dates <- feast_dates[feast_date >= min(long$date) &
+                             feast_date <= max(long$date)]
+
+kable(feast_dt, caption = "Patronal feast calendar per destination")
+fwrite(feast_dt, "output/tables/02b_feast_calendar.csv")
+fwrite(feast_dates, "output/tables/02b_feast_dates_expanded.csv")
+```
+
+# 3. Monthly Volume Time Series
+
+```{r}
+#| label: monthly-volume
+
+monthly_ts <- long[, .(pairs = .N), by = .(destination, yearmonth)]
+
+# ensure dense calendar (fill zero months)
+all_months <- seq(min(long$yearmonth), max(long$yearmonth), by = "month")
+scaffold <- CJ(destination = unique(long$destination),
+                yearmonth = all_months)
+monthly_ts <- merge(scaffold, monthly_ts,
+                     by = c("destination", "yearmonth"), all.x = TRUE)
+monthly_ts[is.na(pairs), pairs := 0L]
+
+p_monthly <- ggplot(monthly_ts, aes(yearmonth, pairs)) +
+  geom_col(fill = "#2E4057") +
+  facet_wrap(~ destination, scales = "free_y", ncol = 2) +
+  labs(title = "Monthly volume by destination",
+       x = NULL, y = "Pairs per month") +
+  theme_minimal()
+
+ggsave("output/figures/02b_monthly_volume.png", p_monthly,
+       width = 12, height = 10)
+p_monthly
+
+fwrite(monthly_ts, "output/tables/02b_monthly_volume.csv")
+```
+
+# 4. STL Decomposition per Destination
+
+```{r}
+#| label: stl-decomposition
+
+# only run STL where enough data
+monthly_counts_check <- monthly_ts[, .(n_months = .N,
+                                         non_zero = sum(pairs > 0)),
+                                    by = destination]
+stl_eligible <- monthly_counts_check[
+  non_zero >= config_2b$min_months_for_stl]$destination
+
+cat("STL eligible destinations (", length(stl_eligible), "):\n")
+cat("  ", paste(stl_eligible, collapse = ", "), "\n\n")
+
+stl_results <- list()
+
+for (d in stl_eligible) {
+  series <- monthly_ts[destination == d][order(yearmonth)]
+
+  # frequency 12 for monthly seasonality
+  ts_vec <- ts(series$pairs,
+                start = c(year(min(series$yearmonth)),
+                          month(min(series$yearmonth))),
+                frequency = 12)
+
+  decomp <- tryCatch(
+    stl(ts_vec, s.window = "periodic", robust = TRUE),
+    error = function(e) NULL
+  )
+
+  if (is.null(decomp)) {
+    cat("  ", d, " STL failed, skipping\n", sep = "")
+    next
+  }
+
+  comp <- as.data.table(decomp$time.series)
+  comp[, yearmonth := series$yearmonth]
+  comp[, destination := d]
+  comp[, pairs := series$pairs]
+
+  stl_results[[d]] <- comp
+}
+
+stl_all <- rbindlist(stl_results)
+
+# strength of seasonality and strength of trend, following Hyndman
+season_strength <- stl_all[, {
+  var_resid <- var(remainder)
+  var_resid_plus_season <- var(remainder + seasonal)
+  var_resid_plus_trend  <- var(remainder + trend)
+  .(strength_seasonal = round(
+      max(0, 1 - var_resid / var_resid_plus_season), 3),
+    strength_trend = round(
+      max(0, 1 - var_resid / var_resid_plus_trend), 3))
+}, by = destination][order(-strength_seasonal)]
+
+kable(season_strength,
+      caption = "Strength of seasonal and trend components (Hyndman & Athanasopoulos)")
+
+fwrite(season_strength, "output/tables/02b_season_strength.csv")
+```
+
+```{r}
+#| label: stl-plots
+
+for (d in stl_eligible) {
+  comp <- stl_results[[d]]
+  if (is.null(comp)) next
+
+  p_data <- rbind(
+    comp[, .(yearmonth, value = pairs,     component = "observed")],
+    comp[, .(yearmonth, value = trend,     component = "trend")],
+    comp[, .(yearmonth, value = seasonal,  component = "seasonal")],
+    comp[, .(yearmonth, value = remainder, component = "remainder")]
+  )
+  p_data[, component := factor(component,
+                                levels = c("observed", "trend",
+                                           "seasonal", "remainder"))]
+
+  p <- ggplot(p_data, aes(yearmonth, value)) +
+    geom_line(colour = "#2E4057") +
+    facet_wrap(~ component, ncol = 1, scales = "free_y") +
+    labs(title = paste0("STL decomposition: ", d),
+         x = NULL, y = NULL) +
+    theme_minimal()
+
+  ggsave(paste0("output/figures/02b_stl_", d, ".png"),
+         p, width = 10, height = 8)
+}
+cat("STL plots saved to output/figures/\n")
+```
+
+# 5. Feast Proximity Analysis
+
+For each article, compute the minimum distance in days to the nearest
+patronal feast of its own destination. Bin by week of proximity.
+
+```{r}
+#| label: feast-proximity
+
+feast_by_dest <- split(feast_dates, feast_dates$destination)
+
+compute_distance <- function(dest, date) {
+  fd <- feast_by_dest[[dest]]$feast_date
+  if (is.null(fd) || length(fd) == 0) return(NA_integer_)
+  min(abs(as.integer(date - fd)))
+}
+
+# vectorised for speed
+long[, dist_to_feast := NA_integer_]
+
+for (d in names(feast_by_dest)) {
+  fd <- feast_by_dest[[d]]$feast_date
+  idx <- which(long$destination == d)
+  if (length(idx) == 0) next
+
+  dists <- sapply(long$date[idx], function(x) min(abs(as.integer(x - fd))))
+  long[idx, dist_to_feast := dists]
+}
+
+# bin: 0-7 (feast week), 8-14 (next week), 15-30 (feast month), 31-60,
+# 61-120, 121-180, 181+ (off season)
+long[, feast_bin := cut(dist_to_feast,
+                         breaks = c(-Inf, 7, 14, 30, 60, 120, 180, Inf),
+                         labels = c("0-7", "8-14", "15-30", "31-60",
+                                    "61-120", "121-180", "181+"),
+                         right = TRUE)]
+
+bin_dist <- long[!is.na(feast_bin),
+                  .N, by = .(destination, feast_bin)]
+bin_dist[, total := sum(N), by = destination]
+bin_dist[, pct := round(N / total * 100, 1)]
+
+bin_wide <- dcast(bin_dist, destination ~ feast_bin,
+                   value.var = "pct", fill = 0)
+kable(bin_wide, caption = "Share of pairs by proximity to nearest patronal feast (%)")
+
+fwrite(bin_wide, "output/tables/02b_feast_proximity_pct.csv")
+```
+
+```{r}
+#| label: feast-proximity-plot
+
+bin_dist[, destination := factor(destination,
+                                   levels = bin_wide[order(-`0-7`),
+                                                      destination])]
+
+p_prox <- ggplot(bin_dist, aes(feast_bin, pct, fill = destination)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~ destination, scales = "free_y", ncol = 2) +
+  labs(title = "Distance from patronal feast",
+       subtitle = "High share in 0-7 bucket indicates feast anchored coverage",
+       x = "Days to nearest feast", y = "Percent of pairs") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 30, hjust = 1))
+
+ggsave("output/figures/02b_feast_proximity.png", p_prox,
+       width = 12, height = 10)
+p_prox
+```
+
+# 6. Feast Window Volume vs Baseline
+
+```{r}
+#| label: feast-window
+
+long[, in_feast_window := dist_to_feast <= config_2b$feast_window_days]
+long[is.na(in_feast_window), in_feast_window := FALSE]
+
+window_analysis <- long[, .(
+  total_pairs = .N,
+  window_pairs = sum(in_feast_window),
+  window_share = round(sum(in_feast_window) / .N * 100, 1)
+), by = destination]
+
+# compute how many days fall inside any window per destination
+# total days in analysis window
+total_days <- as.integer(max(long$date) - min(long$date)) + 1
+
+# days inside feast windows per destination
+window_days_per_dest <- sapply(names(feast_by_dest), function(d) {
+  fd <- feast_by_dest[[d]]$feast_date
+  if (length(fd) == 0) return(0)
+  # all days within feast_window_days of any feast
+  all_d <- seq(min(long$date), max(long$date), by = "day")
+  dists <- sapply(all_d, function(x) min(abs(as.integer(x - fd))))
+  sum(dists <= config_2b$feast_window_days)
+})
+
+window_analysis[, days_in_window := window_days_per_dest[destination]]
+window_analysis[, expected_share_if_uniform :=
+                  round(days_in_window / total_days * 100, 1)]
+window_analysis[, seasonality_index :=
+                  round(window_share / expected_share_if_uniform, 2)]
+window_analysis <- window_analysis[order(-seasonality_index)]
+
+kable(window_analysis, format.args = list(big.mark = ","),
+      caption = paste0("Feast window analysis, ",
+                       config_2b$feast_window_days, " day window each side"))
+
+fwrite(window_analysis, "output/tables/02b_feast_window_analysis.csv")
+```
+
+```{r}
+#| label: seasonality-interpretation
+
+# interpret seasonality index
+window_analysis[, pattern := fcase(
+  seasonality_index >= 3.0, "heavily feast anchored",
+  seasonality_index >= 1.8, "moderately feast anchored",
+  seasonality_index >= 1.2, "mildly feast anchored",
+  seasonality_index >= 0.8, "continuous or uniform",
+  default = "counter-cyclical or off-season heavy"
+)]
+
+kable(window_analysis[, .(destination, window_share,
+                           expected_share_if_uniform,
+                           seasonality_index, pattern)],
+      caption = "Seasonality interpretation per destination")
+```
+
+# 7. Chi Squared Test of Feast vs Non Feast Distribution
+
+Test whether observed feast window volume differs significantly from
+expected under uniform temporal distribution.
+
+```{r}
+#| label: chi-square-test
+
+chi_results <- data.table(destination = character(),
+                           observed_window = integer(),
+                           observed_off = integer(),
+                           expected_window = numeric(),
+                           expected_off = numeric(),
+                           chi_sq = numeric(),
+                           p_value = numeric())
+
+for (d in unique(long$destination)) {
+  dest_data <- long[destination == d]
+  if (nrow(dest_data) < 30) next
+
+  observed_w <- sum(dest_data$in_feast_window)
+  observed_o <- sum(!dest_data$in_feast_window)
+
+  prop_w <- window_days_per_dest[d] / total_days
+  expected_w <- nrow(dest_data) * prop_w
+  expected_o <- nrow(dest_data) * (1 - prop_w)
+
+  if (expected_w < 5 || expected_o < 5) next
+
+  chi <- chisq.test(x = c(observed_w, observed_o),
+                     p = c(prop_w, 1 - prop_w))
+
+  chi_results <- rbind(chi_results, data.table(
+    destination = d,
+    observed_window = observed_w,
+    observed_off = observed_o,
+    expected_window = round(expected_w, 1),
+    expected_off = round(expected_o, 1),
+    chi_sq = round(unname(chi$statistic), 2),
+    p_value = chi$p.value
+  ))
+}
+
+chi_results[, significant := p_value < 0.001]
+chi_results <- chi_results[order(-chi_sq)]
+
+kable(chi_results, format.args = list(big.mark = ","),
+      caption = "Chi squared test: feast window vs uniform distribution")
+
+fwrite(chi_results, "output/tables/02b_chi_square_seasonality.csv")
+```
+
+# 8. Frame Composition Inside vs Outside Feast Windows
+
+Beyond pure volume, examine whether the composition of frames changes
+between feast windows and off-season. A destination whose religious
+frame dominates inside the window but whose tourism frame dominates
+outside the window tells a richer story than volume alone.
+
+```{r}
+#| label: frame-by-window
+
+if (!"dominant_frame" %in% names(long)) {
+  long[, dominant_frame := fcase(
+    has_scandal_register & !has_religious_register & !has_tourism_register,
+      "scandal",
+    has_religious_register & has_tourism_register,
+      "religious_tourism_mixed",
+    has_religious_register & !has_tourism_register & has_scandal_register,
+      "religious_with_scandal",
+    has_religious_register & !has_tourism_register,
+      "religious_only",
+    has_tourism_register & !has_religious_register & has_scandal_register,
+      "tourism_with_scandal",
+    has_tourism_register & !has_religious_register,
+      "tourism_only",
+    default = "other"
+  )]
+}
+
+frame_by_window <- long[, .N,
+                         by = .(destination, in_feast_window,
+                                 dominant_frame)]
+frame_by_window[, total := sum(N), by = .(destination, in_feast_window)]
+frame_by_window[, pct := round(N / total * 100, 1)]
+
+kable(dcast(frame_by_window,
+             destination + in_feast_window ~ dominant_frame,
+             value.var = "pct", fill = 0),
+      caption = "Frame composition by feast window (%)")
+
+fwrite(frame_by_window, "output/tables/02b_frame_by_window.csv")
+```
+
+```{r}
+#| label: frame-shift-plot
+
+frame_by_window[, in_feast_window := factor(
+  in_feast_window, levels = c(FALSE, TRUE),
+  labels = c("off season", "feast window"))]
+
+p_frame_shift <- ggplot(frame_by_window,
+                        aes(in_feast_window, pct, fill = dominant_frame)) +
+  geom_col() +
+  facet_wrap(~ destination, ncol = 3) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Frame composition: feast window vs off season",
+       x = NULL, y = "Percent of pairs", fill = "Frame") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 15, hjust = 1))
+
+ggsave("output/figures/02b_frame_shift_by_window.png", p_frame_shift,
+       width = 12, height = 10)
+p_frame_shift
+```
+
+# 9. Decision Gate
+
+```{r}
+#| label: decision-gate
+
+cat(strrep("=", 60), "\n")
+cat("DECISION GATE 2b\n")
+cat(strrep("=", 60), "\n\n")
+
+checks <- list()
+
+# 1. STL ran for at least 6 destinations
+checks$stl_coverage <- length(stl_results) >= 6
+cat("1. STL decomposition completed for 6+ destinations: ",
+    ifelse(checks$stl_coverage, "PASS", "CAUTION"),
+    " (", length(stl_results), ")\n", sep = "")
+
+# 2. at least half of destinations show significant chi squared result
+n_sig <- sum(chi_results$significant, na.rm = TRUE)
+checks$chi_coverage <- n_sig >= nrow(chi_results) / 2
+cat("2. At least half of destinations show significant chi squared: ",
+    ifelse(checks$chi_coverage, "PASS", "NOTE"),
+    " (", n_sig, " of ", nrow(chi_results), ")\n", sep = "")
+
+# 3. at least one destination each in feast anchored and continuous groups
+has_anchored <- any(window_analysis$seasonality_index >= 1.8)
+has_continuous <- any(window_analysis$seasonality_index >= 0.8 &
+                       window_analysis$seasonality_index < 1.2)
+checks$pattern_diversity <- has_anchored & has_continuous
+cat("3. Both feast-anchored and continuous patterns present: ",
+    ifelse(checks$pattern_diversity, "PASS", "NOTE"), "\n", sep = "")
+
+# 4. frame shift between window and off season is observable
+# look for destinations where religious frame share changes by 10+ points
+shift_test <- dcast(frame_by_window[dominant_frame == "religious_only"],
+                     destination ~ in_feast_window,
+                     value.var = "pct", fill = 0)
+if ("off season" %in% names(shift_test) &&
+    "feast window" %in% names(shift_test)) {
+  shift_test[, shift := abs(`feast window` - `off season`)]
+  checks$frame_shift_visible <- any(shift_test$shift >= 10)
+  cat("4. At least one destination shows 10+ point frame shift: ",
+      ifelse(checks$frame_shift_visible, "PASS", "NOTE"), "\n", sep = "")
+} else {
+  checks$frame_shift_visible <- FALSE
+  cat("4. Frame shift analysis failed, check source data\n")
+}
+
+cat("\n")
+n_pass <- sum(unlist(checks))
+cat("Passed:", n_pass, "of", length(checks), "\n")
+if (all(unlist(checks))) {
+  cat("ALL CHECKS PASSED. Phase 2c can proceed.\n")
+} else {
+  failed <- names(checks)[!unlist(checks)]
+  cat("Attention needed:", paste(failed, collapse = ", "), "\n")
+}
+cat(strrep("=", 60), "\n")
+```
+
+# 10. Save Outputs
+
+```{r}
+#| label: save
+
+meta_2b <- list(
+  timestamp          = Sys.time(),
+  phase              = "2b_seasonality",
+  config             = config_2b,
+  liturgical_calendar = liturgical_calendar,
+  feast_dt           = feast_dt,
+  feast_dates        = feast_dates,
+  monthly_ts         = monthly_ts,
+  season_strength    = season_strength,
+  bin_dist           = bin_dist,
+  window_analysis    = window_analysis,
+  chi_results        = chi_results,
+  frame_by_window    = frame_by_window,
+  checks             = checks
+)
+saveRDS(meta_2b, config_2b$output_metadata)
+
+# save long corpus enriched with feast proximity columns
+saveRDS(long, "data/destinations_analytical_with_feast.rds")
+cat("Phase 2b metadata and enriched corpus saved.\n")
+```
+
+# 11. Interpretive Summary
+
+Phase 2b has produced four interpretive layers that directly answer the
+third research question.
+
+First, the STL seasonal strength index quantifies how much of each
+destination's volume variation is attributable to a recurring annual
+cycle. Values above 0.6 indicate strongly cyclic coverage.
+
+Second, the feast proximity distribution shows how concentrated each
+destination's coverage is around patronal dates. The share of pairs in
+the 0-7 day bin is the simplest single number indicator of feast
+anchoring.
+
+Third, the seasonality index compares observed feast window share to
+the share expected under uniform distribution. Values above 1.8 signal
+meaningful over representation during feast windows, values near 1
+signal continuous coverage.
+
+Fourth, the frame shift analysis reveals whether a destination changes
+its media profile during feast windows. Ludbreg may for instance be
+almost exclusively religious framed year round, while Trsat may shift
+from tourism framing in summer to religious framing around patronal
+feasts. This layer is particularly informative for the research
+question about how media construct the destination.
+
+Phase 2c will bring these three layers together through a framing model
+that includes month and destination as covariates.

@@ -1,0 +1,170 @@
+---
+title: "Memorijalni okvir kao treći registar u medijskoj reprezentaciji hrvatskih marijanskih i drugih katoličkih odredišta (2021.--2024.)"
+author:
+  - name: "TBD"
+    affiliation: "Hrvatsko katoličko sveučilište, Odjel za komunikologiju"
+date: today
+abstract: |
+  TBD -- Croatian abstract.
+abstract-en: |
+  TBD -- English abstract.
+keywords: [religijski turizam, digitalni mediji, strukturalni model tema, Hrvatska, računalna društvena znanost]
+format:
+  html:
+    toc: true
+  pdf:
+    toc: false
+  docx:
+    toc: false
+bibliography: references.bib
+csl: citation-style.csl
+lang: hr
+---
+
+# Uvod
+
+Studije medijskog uokvirivanja religijskog turizma uobičajeno pretpostavljaju binarnu strukturu diskursa. Prvi je registar religijski i tretira svetište kao mjesto duhovnog iskustva. Drugi je registar turistički i gleda na svetište kao na destinaciju s ekonomskim profilom. Ta se pretpostavka eksplicitno reproducira u domaćoj literaturi (Duvnjak, Relja i Žeravica, 2011; Čavlek i sur., 2011), a empirijska istraživanja medijskog sadržaja tipično operacionaliziraju distinkciju kroz dva komplementarna leksička rječnika ili kroz dvodimenzionalan kontinuum između duhovnih i sekularnih motiva (Cohen, 1979; Smith, 1992; Collins-Kreiner, 2020). U ovom radu, na temelju računalne analize 13 921 medijskog članka o deset hrvatskih katoličkih odredišta objavljenih u razdoblju od siječnja 2021. do svibnja 2024., pokazujemo da binarni model sustavno previđa treći, kvantitativno značajan registar.
+
+Petnaest posto članaka iz korpusa pripada registru koji nazivamo memorijalnim. Riječ je o diskursu u kojem su svetište, hodočašće ili katolički blagdan tematski povezani sa žrtvama, ratnim spomenom i kolektivnom traumom. Memorijalni registar nije ravnomjerno raspoređen po korpusu, nego je koncentriran u lokalnim marijanskim svetištima (22,9 % članaka iz tog tipa) i strukturno vezan uz mjesta čija je liturgijska identitet posredovana sjećanjem na Domovinski rat. To se prije svega odnosi na Voćin, u kojem je 13. prosinca 1991. počinjen masakr nad civilima, te na Aljmaš, čija je novija pobožnost obilježena prognaničkim iskustvom istočnoslavonskog egzodusa 1991. i 1992. godine. Iz toga proizlazi središnja teza ovoga rada. Analitički okvir koji medijsko uokvirivanje katoličkih odredišta svodi na dijadu religijskog i turističkog sustavno krivo čita pokrivenost lokalno značajnih svetišta u poslijeratnim društvima.
+
+Rad je strukturiran kako slijedi. U pregledu literature (§2) izlažemo dvostruku tradiciju definiranja religijskog turizma i obrazlažemo zašto memorijalni registar do sada nije bio analitički vidljiv. U §3 opisujemo korpus, tipologiju odredišta s tri kategorije (nacionalna marijanska svetišta, lokalna marijanska svetišta i nemarijanska katolička svetišta) te analitičke postupke koji uključuju rječničko označavanje registara, hi-kvadrat dekompoziciju, multinomijalnu logističku regresiju, strukturalni model tema i ručno kodiranje za vanjsku validaciju. U §4 prikazujemo četiri ključna nalaza. Prvi se odnosi na distribuciju triju registara u korpusu (§4.1), drugi na geografiju memorijalnog okvira po tipovima odredišta (§4.2), treći na neovisnost induktivnog topičkog modela od rječničke klasifikacije (§4.3), a četvrti na stabilnost distribucije okvira u razdoblju od 2021. do 2024. unatoč pandemijskom prekidu (§4.4). U §5 raspravljamo implikacije nalaza za teoriju medijatizacije katolicizma u poslijeratnim društvima i za metodologiju računalne analize religijskog medijskog sadržaja.
+
+# Pregled literature
+
+## Definicija religijskog turizma
+
+Pojam religijskog turizma u suvremenoj literaturi nije jednoznačan, pa se u radu mora eksplicitno zauzeti stav. Tri su ključne linije razgraničenja koje treba razriješiti prije nego se krene u empiriju.
+
+Prvo razgraničenje tiče se odnosa hodočašća i religijskog turizma. Tradicionalna antropologija Turnera i Turnera (1978) te kasnija studija Eadea i Sallnowa (1991) tretirala je hodočašće kao ritualnu praksu čija je primarna svrha duhovna, a turizam kao praksu čija je svrha sekularna. Od Cohena (1979, 1992) i Smith (1992) ta se binarnost razgrađuje kroz ideju kontinuuma na kojemu se posjetitelj smješta između dvaju polova, od vjerskog putnika do sekularnog odmoraša. Collins-Kreiner (2020) zaključuje kako je to razlikovanje danas u praksi neodrživo jer motivi posjetitelja rutinski kombiniraju duhovne, kulturne i konzumne elemente.
+
+Drugo razgraničenje odnosi se na pitanje motiva naspram prostora. Griffin i Raj (2018) predlažu operativnu definiciju po kojoj religijski turizam obuhvaća svaki oblik putovanja koji uključuje posjet svetištu, vjerskom objektu ili vjerskom događaju, bez obzira jesu li motivi putnika primarno religijski ili sekularni. Takva prostorna definicija rješava problem nepouzdanosti samoprijavljenih motiva i daje empirijski mjerljiv kriterij, što je metodološki važno jer u medijskim tekstovima rijetko je dostupan motivacijski podatak pojedinog posjetitelja.
+
+Treće razgraničenje nudi hrvatska literatura. Duvnjak, Relja i Žeravica (2011) definiraju religijski turizam kao poseban segment turističke ponude koji se odvija u prostorima vjerskog značaja i u kojem su sadržaji duhovne, kulturne i hodočasničke prirode međusobno isprepleteni. Čavlek i suradnici (2011) naglašavaju njegovu ekonomsku funkciju konverzije neekonomskih dobara u ekonomska. Religijski turizam tako istodobno proizvodi duhovnu i ekonomsku vrijednost, što objašnjava zašto u njemu često postoji napetost između sakralnog i komercijalnog registra.
+
+Za potrebe ovog rada predlaže se sljedeća radna definicija. Religijska turistička destinacija je prostor koji istodobno ispunjava dva kriterija. Prvi je da prostor funkcionira kao svetište, hodočasničko mjesto ili sakralni lokalitet s prepoznatim duhovnim i kulturno povijesnim značajem. Drugi je da je pozicioniran u turističkoj i medijskoj komunikaciji kao destinacija koja privlači posjetitelje s heterogenim motivima, od strogo vjerskih do pretežno kulturnih. U ovome se radu analizira medijska reprezentacija takvih destinacija u cijelosti, obuhvaćajući sve registre u kojima se one pojavljuju, kako bi se rekonstruirao njihov diskurzivni profil kao kombinacija sakralnog, turističkog, kulturnog, političkog i ostalih okvira.
+
+## Relevantnost istraživačkih pitanja
+
+### Frekvencija medijskog spominjanja
+
+Frekvencijska analiza najjednostavnije je operacionalizirana komponenta, ali njezina je teorijska težina veća nego što se isprva čini. Mediji ne reflektiraju prostor podjednako, nego ga selektivno proizvode kao javno značajan. To što određene destinacije dominiraju medijskim prostorom nije puka empirijska činjenica nego izraz dugoročnih procesa postavljanja dnevnog reda (McCombs i Shaw, 1972) i institucionalne vidljivosti. Frekvencija je, drugim riječima, zamjenska mjera za ono što Couldry i Hepp (2017) nazivaju medijatiziranom prisutnošću, odnosno sposobnošću jednog prostora da uopće uđe u javnu komunikacijsku sferu. Za hrvatski kontekst ovo pitanje ima dodatnu vrijednost jer postoji zanimljiv nesrazmjer između crkveno simboličkog statusa pojedinog svetišta i njegove medijske vidljivosti.
+
+### Kontekst i ton spominjanja
+
+Kontekst i ton spominjanja ono je što u komunikologiji nazivamo okvirom. Entman (1993) definira okvir kao selekciju određenih aspekata neke stvarnosti i njihovo isticanje u komunikacijskom tekstu na način koji promiče određenu definiciju problema, uzročnu interpretaciju, moralnu procjenu ili preporuku djelovanja. Za religijska svetišta to znači da isti prostor može biti uokviren kao duhovno središte, turistička atrakcija, kulturno heritažno mjesto, politički simbol, folklorna pozornica ili mjesto skandala. Izbor okvira bitno određuje kako publika procesira poruku i kakvu turističku odluku potencijalno donosi. Pavić, Kurbanović i Levak (2017) u hrvatskom kontekstu pokazuju da medijatizacija katolicizma u Hrvatskoj ne donosi nove interpretacije doktrina, ali redefinira način na koji se crkveni prostori i događaji prezentiraju javnosti.
+
+### Sezonalnost medijskih objava
+
+Sezonalnost je teorijski zanimljiva iz dva razloga. Operativno, religijski turizam u Hrvatskoj odvija se oko fiksnih liturgijskih datuma poput Velike Gospe, Male Gospe, blagdana svetih Petra i Pavla i godišnjih hodočašća u Mariju Bistricu i Trsat. Ako medijska prisutnost prati te datume ciklički, mediji destinacije tretiraju kao događajne, a ne kao trajne tematske sadržaje. Razlika je fundamentalna za percepciju svetišta kao turističke destinacije u modernom smislu, jer trajno prisutna destinacija gradi imidž i brend, a događajno prisutna ostaje unutar folklorne i kalendarske svijesti publike. Teorijski, Katić i Klarin (2024) dokumentiraju napetost između svetišta kao godišnjeg događaja i svetišta kao stalne turističke atrakcije, što omogućuje klasifikaciju hrvatskih svetišta po toj dimenziji kao vrijedan empirijski doprinos.
+
+# Podaci i metode
+
+## Istraživački dizajn
+
+Rad se temelji na kvantitativnoj analizi medijskog sadržaja (Krippendorff, 2018) povezanoj s teorijom uokvirivanja (Entman, 1993) i metodom računalnog modeliranja tema (Roberts i sur., 2014). Cilj je rekonstruirati medijsku reprezentaciju hrvatskih religijsko-turističkih odredišta u digitalnom medijskom prostoru u razdoblju od siječnja 2021. do svibnja 2024. godine. Analitički pristup kombinira pet komponenti. Rječničko označavanje registara s padežnom pokrivenošću za hrvatski jezik daje primarnu klasifikaciju članaka. Hi-kvadrat dekompozicija s mjerom snage povezanosti testira vezu između destinacije i okvira. Multinomijalna logistička regresija provodi multivarijatnu kontrolu konfundirajućih efekata vremena, mjeseca, platforme objave i blagdanskog prozora. Strukturalni model tema služi za induktivnu validaciju rječničke klasifikacije. Naposljetku, dvostruko ručno kodiranje stratificiranog uzorka procjenjuje pouzdanost rječničkog označavanja. Jedinica analize je medijski članak, a svaki je članak pripisan jednoj od deset destinacija prema primarnom spomenu u tekstu.
+
+## Izvor podataka i konstrukcija korpusa
+
+Podaci za ovaj rad potječu iz baze DigiKat. Riječ je o javno dostupnoj bazi medijskih objava o katoličkoj tematici u hrvatskom digitalnom prostoru, koja je nastala u sklopu istoimenoga istraživačkog projekta Hrvatskoga katoličkog sveučilišta. Baza prikuplja sadržaj automatiziranim alatima u stvarnom vremenu i indeksira informativne portale, blogove, forume te javne objave na društvenim platformama poput Facebooka, X-a, Reddita, YouTubea i Instagrama. U inačici korištenoj u ovome radu obuhvaća više od 600 000 objava prikupljenih u razdoblju od 2021. do 2026. godine, s pretežnom koncentracijom u hrvatskome jeziku i na hrvatskom geografskom području. Cjelovita metodologija prikupljanja, popis varijabli i otvorena inačica podataka opisani su u projektnoj dokumentaciji (DigiKat, 2026).
+
+Za potrebe ovog istraživanja iz baze DigiKat izdvojen je tematski podkorpus. Iz vremenskog raspona od siječnja 2021. do svibnja 2024. zadržani su članci koji u naslovu ili tekstu spominju neku od deset odabranih hrvatskih katoličkih destinacija. Pretraživanje toponima i pripadajućih pridjeva morfološki je osjetljivo i pokriva nominativ, genitiv, dativ, akuzativ, lokativ i instrumental hrvatskoga jezika. Time se istodobno hvataju različiti padežni i pridjevski oblici poput Marija Bistrica, Mariji Bistrici i bistrička, ili Sinj, Sinju i sinjska.
+
+Pet destinacija ima toponime koji se često pojavljuju izvan religijsko-turističkog konteksta. Sinj redovito ulazi u sportske vijesti, Nin se preklapa s osobnim imenom Nina, a Solin, Krasno i Ludbreg ulaze u različite opće upotrebne fraze i nazive izvan svetišne tematike. Za te su destinacije primijenjena dodatna sadržajna ograničenja. Članak ulazi u podkorpus jedino ako uz toponim sadrži leksički znak iz neke od triju kontrolnih skupina, a to su religija, hodočašće i turizam. Time se osigurava da podkorpus obuhvaća isključivo članke koji o tim destinacijama govore u relevantnome sadržajnome kontekstu.
+
+Nakon uklanjanja duplikata i standardnih medijskih elemenata poput autorskih rubrika i navigacijskih okvira te nakon filtriranja po duljini teksta i jeziku, analitički korpus zadržava 13 921 članak. Destinacije su unaprijed klasificirane u tri tipa. U skupinu nacionalnih marijanskih svetišta ulaze Sinj (4 044 članka), Marija Bistrica (3 018) i Trsat (1 695), ukupno 8 757 članaka. U skupinu lokalnih marijanskih svetišta ulaze Aljmaš (1 628), Voćin (1 093), Ludbreg (331), Krasno (230) i Vepric (188), ukupno 3 470 članaka. U skupinu nemarijanskih katoličkih svetišta ulaze Solin (851) i Nin (843), ukupno 1 694 članka.
+
+## Označavanje registara
+
+Svaki je članak iz korpusa označen prema rječničkim tragovima šest registara. Rječnici su pripremljeni za hrvatski jezik i pokrivaju glavne padežne oblike pojmova. Religijski registar obuhvaća leksik svetišta, hodočašća, blagdana, biskupa, svećenika, Gospe, mise, križa, oltara, krunice i srodne riječi. Turistički registar obuhvaća turizam, destinaciju, posjetitelja, hotel, smještaj, sezonu, izlet, atrakciju i srodne pojmove. Memorijalni registar obuhvaća leksik žrtve, spomena, stradanja, masakra, prognanika, mučenika, Domovinskog rata, ratnog konteksta i komemoracije. Skandal-registar obuhvaća skandal, kontroverzu, optužbu, istragu i aferu. Posebna skupina toponimskih pojmova s pripadajućim pridjevima služi za prepoznavanje samoga spomena destinacije i ne ulazi izravno u klasifikaciju okvira.
+
+Iz aktivnih registara u svakom članku izvedena je kategorička varijabla okvira članka. Pravila izvođenja slijede ustaljenu leksikografsku praksu (Pennebaker i sur., 2015; Stoll i sur., 2020). Kada članak istodobno aktivira religijski i turistički registar, a ne aktivira memorijalni ili skandal-registar, klasificira se kao mješoviti religijsko-turistički. Kada članak istodobno aktivira religijski i memorijalni registar, bez snažnih turističkih obilježja, klasificira se kao religijsko-memorijalni. Tako se dobiva šestočlana klasifikacija s kategorijama religijski isključivo, religijsko-turistički mješoviti, turistički isključivo, religijsko-memorijalni, religijski sa skandalom i turistički sa skandalom.
+
+Pri razini pragova primijenjenoj u ovome radu izolirane kategorije memorijalni isključivo i skandal isključivo praktički ne postoje u korpusu. Memorijalni se registar gotovo uvijek pojavljuje uz religijski, a skandal-registar gotovo nikada nije izoliran u sadržaju o katoličkim svetištima. Memorijalni je rječnik dodan u trenutnoj inačici rječničkoga aparata zato što su ranije analize ostavljale velik dio sadržaja o Voćinu i Aljmašu nezadovoljavajuće klasificiranim. Cjelovit popis leksema po registru i kontrolne provjere padežne pokrivenosti dostupni su u prilogu.
+
+## Analitički postupci
+
+Za testiranje povezanosti destinacije i okvira upotrijebljen je hi-kvadrat test nezavisnosti s pripadajućom mjerom snage povezanosti, Cramérovim *V* (Cramér, 1946). Cramérov *V* skalira efekt na raspon od nule do jedan i omogućuje supstantivnu interpretaciju neovisnu o veličini uzorka. Vrijednost nula označuje neovisnost varijabli, a vrijednost jedan savršenu povezanost. U dekompoziciji povezanosti korišteni su standardizirani reziduali za identifikaciju ćelija s nadprosječnim ili podprosječnim opažanjima u odnosu na pretpostavku nezavisnosti.
+
+Za multivarijatnu kontrolu konfundirajućih efekata procijenjena je multinomijalna logistička regresija (Hosmer i sur., 2013). Ovisna varijabla u modelu je okvir članka, a referentna kategorija religijski isključivo. Prediktori uključuju destinaciju, tip destinacije, godinu, mjesec, platformu objave i indikator blagdanskoga prozora. Multinomijalni logit poopćuje binarnu logističku regresiju na ovisnu varijablu s više od dvije kategorije. Za svaku ne-referentnu kategoriju procjenjuje se zaseban skup koeficijenata koji izražavaju logaritamske omjere šansi u odnosu na referentnu kategoriju. Time se simultano kontroliraju svi prediktori u modelu. Goodness-of-fit izvještava se kroz Akaikeov informacijski kriterij (Akaike, 1974).
+
+Za induktivnu validaciju rječničke klasifikacije procijenjen je strukturalni model tema (Roberts i sur., 2014; Roberts, Stewart i Tingley, 2019). Model pretpostavlja da je svaki članak generiran kao mješavina latentnih tema te dopušta kovarijatne prediktore distribucije tema. Optimalan broj tema izabran je dijagnostikom logaritamske vjerodostojnosti na uzorku zadržanih dokumenata uz kvalitativnu provjeru semantičke koherentnosti i ekskluzivnosti tema (FREX-mjera, Bischof i Airoldi, 2012). Konvergentna valjanost rječničke i induktivne klasifikacije procijenjena je dvama pokazateljima. Prvi je udio članaka kojima dominantna tema pripada istoj registarskoj kategoriji kao i dominantni rječnički okvir. Drugi je prilagođeni Randov indeks (Hubert i Arabie, 1985), koji procjenjuje slaganje dviju klasifikacija korigirano za slaganje očekivano slučajem.
+
+Za vanjsku validaciju rječničkoga označavanja provedeno je dvostruko ručno kodiranje stratificiranoga uzorka od 200 članaka, s 20 članaka po destinaciji. Kodirni list slijedi šestočlanu shemu okvira iz §3.3. Pouzdanost među koderima procijenit će se Cohenovim kappa indeksom (Cohen, 1960) i Krippendorffovom alfom (Krippendorff, 2004). Konačni rezultati pouzdanosti uvrstit će se u finalnu inačicu rada.
+
+# Rezultati
+
+## Tri registra umjesto dva
+
+Distribucija šest okvira u korpusu od 13 921 članka prikazana je u Tablici 1. Religijski isključivo okvir najzastupljeniji je s 5 504 članaka (39,5 %), slijede religijsko-turistički mješoviti s 3 133 članaka (22,5 %), turistički isključivo s 2 904 članka (20,9 %) i religijsko-memorijalni s 2 103 članka (15,1 %). Dva preostala okvira koja uključuju skandal-registar skupno čine manje od dva posto korpusa, ukupno 277 članaka (2,0 %), što potvrđuje da skandalni diskurs u medijskoj pokrivenosti hrvatskih katoličkih odredišta u promatranom razdoblju nije strukturalno značajan.
+
+| Okvir                                | *N*    | %      |
+|--------------------------------------|--------|--------|
+| Religijski isključivo                | 5 504  | 39,5   |
+| Religijsko-turistički mješoviti      | 3 133  | 22,5   |
+| Turistički isključivo                | 2 904  | 20,9   |
+| Religijsko-memorijalni               | 2 103  | 15,1   |
+| Religijski sa skandalom              |   141  |  1,0   |
+| Turistički sa skandalom              |   136  |  1,0   |
+| Ukupno                               | 13 921 | 100,0  |
+
+: Distribucija okvira u analitičkom korpusu. {#tbl-frame-distribution}
+
+Glavni teorijski značaj nalaza leži u petnaestpostotnom udjelu memorijalnog registra. Studije medijatizacije religije u hrvatskom kontekstu (Pavić, Kurbanović i Levak, 2017; Marinović Jerolimov, 2014) tipično konceptualiziraju medijski diskurs o katoličkim svetištima kroz duhovno-kulturni dvojac, dok teorije religijskog turizma operacionaliziraju isti prostor kroz dijadu religiozno-turističko (Griffin i Raj, 2018; Collins-Kreiner, 2020). Ni jedan ni drugi pristup ne predviđa zaseban memorijalni registar. Naš nalaz pokazuje da gotovo svaki sedmi članak u korpusu hrvatske medijske pokrivenosti katoličkih odredišta operira u jeziku spomena, žrtve i kolektivne traume. Riječ je o registru koji se preklapa s religijskim, ali se ne svodi na njega. Empirijski je riječ o linearnoj kombinaciji religijskog i memorijalnog leksika koji u mješovitim slučajevima zadržava liturgijski okvir, ali ga semantički preplavljuje sjećanjem.
+
+Hi-kvadrat test nezavisnosti potvrđuje statistički značajnu povezanost destinacije i okvira (χ²(45) = 1 757,4, *p* < 0,001, Cramérov *V* = 0,159). Veličina efekta od 0,159 na ljestvici od nule do jedan ukazuje na malen do umjeren stupanj povezanosti. Destinacije se međusobno razlikuju u distribuciji okvira, ali okvirna kompozicija nije dominantno determinirana destinacijom. Znatan dio varijacije proizlazi iz unutar-destinacijske heterogenosti članaka. Multinomijalna logistička regresija s kontrolom za godinu, mjesec, platformu i blagdanski prozor (AIC = 33 087) potvrđuje da povezanost destinacije i okvira opstaje i nakon multivarijatne kontrole konfundirajućih varijabli. Potpuna tablica koeficijenata dostupna je u prilogu (Tablica S1). Glavni supstantivni nalaz multivarijatnoga modela jest da nemarijanska odredišta poput Solina i Nina pokazuju značajno povišene logaritamske omjere šansi za turistički okvir u odnosu na nacionalna marijanska svetišta, dok lokalna marijanska svetišta pokazuju značajno povišene omjere za religijsko-memorijalni okvir. Time se statistički potvrđuje kvalitativni obrazac o kojemu se raspravlja u §4.2.
+
+## Geografija memorijalnog okvira
+
+Distribucija okvira po tipu odredišta razotkriva sustavni obrazac (Tablica 2). Lokalna marijanska svetišta nose najveće memorijalno opterećenje s 22,9 % članaka u religijsko-memorijalnom okviru, nacionalna srednje s 13,1 %, a nemarijanska najmanje s 9,4 %. Suprotno tom obrascu, nemarijanska odredišta vode u turističkom okviru s 29,4 % i nadvisuju ostale tipove za približno sedam do jedanaest postotnih bodova. Religijski isključivo okvir izrazito dominira na nacionalnim marijanskim svetištima (43,5 %), s manjim udjelom na lokalnim marijanskim (31,5 %) i nemarijanskim (35,5 %) svetištima. Mješoviti religijsko-turistički okvir približno je ravnomjerno raspoređen među tipovima i kreće se između 19,7 % i 23,5 %, što sugerira da je miješanje religijskoga i turističkog jezika strukturna karakteristika hrvatskoga medijskog diskursa o svetištima neovisno o tipu odredišta.
+
+| Tip odredišta             | Religijski isključivo (%) | Religijsko-turistički mješoviti (%) | Turistički isključivo (%) | Religijsko-memorijalni (%) |
+|---------------------------|--------------------------:|------------------------------------:|--------------------------:|---------------------------:|
+| Nacionalno marijansko     | 43,5                      | 23,5                                | 18,5                      | 13,1                       |
+| Lokalno marijansko        | 31,5                      | 19,7                                | 22,6                      | 22,9                       |
+| Nemarijansko              | 35,5                      | 23,1                                | 29,4                      |  9,4                       |
+
+: Distribucija okvira po tipu odredišta. Postoci su izračunati po retku. Iz tablice su izostavljena dva okvira sa skandal-registrom zbog niske ukupne zastupljenosti. {#tbl-frame-by-type}
+
+Memorijalno opterećenje lokalnih marijanskih svetišta nije ravnomjerno raspoređeno. Ono je koncentrirano u dvama odredištima čiji je liturgijski identitet u poslijeratnom razdoblju strukturno preplavljen sjećanjem na Domovinski rat. Voćin je mjesto u zapadnoj Slavoniji u kojem je 13. prosinca 1991. počinjen masakr nad osamnaest civila i u kojem je razorena obnovljena marijanska crkva sv. Roka. To odredište bilježi izrazito visok udio religijsko-memorijalnog okvira, jer oko 35 % članaka iz Voćina pripada tom okviru. Aljmaš je prognaničko marijansko svetište povezano sa stradanjem hrvatskoga stanovništva istočne Slavonije i mirnom reintegracijom Podunavlja, te slijedi s približno 25 % članaka u memorijalnom okviru. Ostala lokalna marijanska svetišta poput Veprica, Krasnog i Ludbrega imaju umjereno povišen udio memorijalnog okvira u odnosu na nacionalna, ali bez koncentracije zabilježene za Voćin i Aljmaš. Te dvije destinacije zajedno objašnjavaju gotovo cjelokupnu razliku u memorijalnom udjelu između lokalnih marijanskih i ostalih svetišta.
+
+Memorijalni registar, dakle, nije generička oznaka religijsko-historijskog spomena u korpusu, nego ima konkretni geografski potpis vezan uz prostore Domovinskog rata. U medijskoj reprezentaciji marijanskih svetišta čija je liturgijska prisutnost nakon 1991. posredovana ratnim iskustvom, religijski jezik dosljedno aktivira memorijalni leksik. Riječ je o specifično hrvatskom obliku medijatiziranog katolicizma koji empirijski nije svodiv ni na religijski ni na turistički registar i koji u dosadašnjim teoretizacijama religijskog turizma ostaje neimenovan. Implikacije za teoriju medijatizacije katolicizma u poslijeratnim društvima razmatraju se u §5.
+
+## Konvergentna validnost rječničkih kategorija i induktivnih tema {#sec-orthogonality}
+
+Kako bismo provjerili je li registarska klasifikacija iz §4.1 robusna na izbor metodološkog pristupa, procijenili smo strukturalni model tema na korpusu od 13 921 članka. Specifikacija prevalencije tema preuzima istu prediktorsku strukturu kao multinomijalna regresija u §4.1, a obuhvaća destinaciju, tip destinacije, prirodni splajn godine i indikator blagdanskog prozora. Optimalan broj tema *K* odabran je dijagnostikom logaritamske vjerodostojnosti na uzorku zadržanih dokumenata, pri čemu je u uzorku zadržano 10 % korpusa. Pretraženi raspon obuhvaća jedanaest vrijednosti *K* iz skupa 5, 7, 9, 10, 12, 15, 18, 20, 25, 30 i 35.
+
+Krivulja logaritamske vjerodostojnosti dostiže maksimum pri *K* = 30 (−6,663), s blagim padom pri *K* = 35 (−6,668) te nižim vrijednostima pri *K* = 25 (−6,706) i *K* = 20 (−6,797). To potvrđuje da je *K* = 30 lokalni optimum unutar pretraženog raspona, a ne rubna vrijednost koja bi otvarala sumnju da optimalna konfiguracija leži iznad pretrage. Sve glavne odluke decizijskih vrata strukturalnog modela tema (konvergencija u 95 iteracija, neraspad tema, izostanak dominantne teme, stopostotna pokrivenost korpusa, slaganje s rječnikom) ocijenjene su pozitivno. Minimalna čistoća tema bilježi se kao CAUTION pri 36,9 % za temu T23 (ninski turistički klaster) i ne utječe na supstantivnu interpretaciju. Dijagnostička krivulja izbora *K* prikazana je u prilogu kao Slika S1.
+
+Topičku strukturu modela najbolje opisuju tri tipa tema, sažeto prikazana u Tablici 3. Čisto religijske teme broje šest jedinica i obuhvaćaju devocijski leksik, biskupske i franjevačke glasove te liturgijske događaje na nacionalnoj razini. Tema T15 prikazuje bistrička proštenja, tema T16 splitsko-makarsko episkopalno javljanje, tema T21 franjevački red kroz glas fra Zvjezdana Linića, a tema T28 godišnje obljetnice blaženog Alojzija Stepinca. Čisto turistička tema zastupljena je jednom jedinicom u modelu. Riječ je o temi T14 s leksikom odmora, wellnessa, spa-a, resorta i noćenja, koja s udjelom turističkog rječničkog registra od 92,6 % dominantno pokriva velebitsko-krašnjarski rekreacijski sadržaj. Mjesto-događajni klasteri čine većinu modela i obuhvaćaju preostalih 23 teme. Te teme opisuju specifične sprege destinacije i događaja, poput političkog konteksta Sinjske Alke (T11 s riječima alku, alkarskog, milanović, sinjsku i boban), klapskog pjevanja pred čudotvornom slikom Sinjske Gospe (T13), zavjetnih dolazaka vatrogasaca i policije u Mariju Bistricu (T6), Eucharistijskog svetišta u Ludbregu (T25), solinskog festivala na Gradini (T17) i ninskog turističkog ekosustava (T23). Cjelovita lista tema s FREX vokabularom dostupna je u prilogu (Tablica S2).
+
+| Tematski tip                  | *N* tema | Reprezentativne teme i njihov FREX vokabular |
+|-------------------------------|---------:|----------------------------------------------|
+| Čisto religijske              |        6 | T15 (bistričke, nacionalno, rođacima), T27 (velike, gospe, blagdana), T30 (misa, uživo, krunica) |
+| Čisto turistička              |        1 | T14 (odmor, wellness, spa, resort, noćenje) |
+| Mjesto-događajni klasteri     |       23 | T11 sa Sinjskom Alkom (alku, alkarskog, sinjsku), T25 s ludbreškom Predragocjenom Krvi (krvi, kristove, ludbregu), T8 s Požeškom biskupijom (voćinske, požeške, škvorčević, aljmaš), **T19 s ratnim spomenom (selu, ratu, zločina, počast, žrtvama)** |
+
+: Tematska struktura strukturalnog modela tema pri *K* = 30. Prikazana su tri tipa tema. {#tbl-stm-types}
+
+Najvažniji je nalaz s aspekta validacije memorijalnog registra to što strukturalni model tema neovisno otkriva ratno-spomensku temu. Tema T19, definirana FREX vrhovima selu, ratu, zločina, počast i žrtvama, obuhvaća 301 članak u kojima je modalni rječnički okvir religijski isključivo te u kojima dominira spomenski leksik vezan uz Domovinski rat. Komplementarna tema T8, s riječima voćinske, požeške, voćinskoj, škvorčević i aljmaš u svom FREX vrhu, istovremeno spominje Voćin i Aljmaš te požeškog biskupa Antuna Škvorčevića. Ona obuhvaća 661 članak pod modalnim okvirom religijsko-turistički mješoviti i opisuje diskurs Požeške biskupije vezan uz oba memorijalna marijanska svetišta. Obje teme zajedno daju induktivnu potvrdu da memorijalni registar identificiran rječnički u §4.1 i §4.2 postoji i kao vlastiti tematski klaster, a ne tek kao leksički otisak unutar inače religijskih članaka.
+
+Unatoč toj točkastoj konvergenciji opće slaganje rječničke i induktivne klasifikacije ostaje nisko. Udio članaka kojima dominantna tema pripada istoj registarskoj kategoriji kao i dominantni rječnički okvir iznosi 54,6 % i time prelazi unaprijed definirani prag od 50 %. Prilagođeni Randov indeks iznosi 0,018, što je praktički nula. Dva broja zajedno opisuju strukturu odnosa između dviju klasifikacijskih shema. Slaganje od 54,6 % pokazuje da među trideset tema postoje one čiji se modalni rječnički okvir podudara s dominantnim registrom, osobito čisto religijske teme i čisto turistička tema. Indeks blizak nuli pokazuje da takva preklapanja ne formiraju strukturno slaganje između dviju klasifikacija na razini cijeloga korpusa. Drugim riječima, dvije metode mjere strukturno različite osi sadržaja. Rječnik mjeri leksički registar i odgovara na pitanje kategoriziraju li riječi u članku duhovni, turistički, memorijalni ili skandalni jezični kod. Strukturalni model tema mjeri mjesto-događajnu kookurenciju i odgovara na pitanje koji se akteri, lokaliteti i događaji pojavljuju zajedno u istom članku.
+
+Ova dijagnostika nije slabost modela, nego empirijsko obrazloženje zašto su dvije metode komplementarne, a ne konkurentne. Rječnička klasifikacija identificira memorijalni registar kao linearnu kombinaciju dvaju leksičkih kodova, religijskog i memorijalnog. Strukturalni model tema isti taj registar identificira kao mjesto-događajni klaster vezan uz Voćin, Aljmaš i Požešku biskupiju. Dvostruka detekcija, ujedno registarska i tematska, čini glavni nalaz ovoga rada robusnim u odnosu na izbor klasifikacijske metode. Riječ je o petnaestpostotnom udjelu memorijalnog okvira u medijskoj reprezentaciji hrvatskih katoličkih odredišta. Da je memorijalni registar artefakt rječnika, strukturalni model tema ne bi ga reproducirao samostalnom temom. Da je artefakt induktivnoga modela, ne bi se ponavljao u rječničkoj registarskoj distribuciji. Dvostruka neovisna detekcija eliminira oba metodološka prigovora.
+
+## Stabilnost u razdoblju nakon pandemije
+
+Da bismo testirali sugeriraju li podaci sustavni vremenski pomak okvirne distribucije, procijenili smo regresijski model udjela turističkog okvira u funkciji godine, uz fiksne efekte destinacije i tipa destinacije. Test je usmjeren na dvije moguće interpretacije. Prva je pretpostavka post-pandemijskog povratka turističkog okvira koji bi mogao proizaći iz masovnih kampanja revitalizacije turizma 2022. i 2023. godine. Druga je pretpostavka oporavka crkvenih okupljanja s posljedičnim porastom religijskog okvira. Koeficijent uz godinu iznosi −0,0019 (*p* = 0,94), praktički nula i statistički neznačajan. Koeficijent uz tip destinacije također ne doseže prag značajnosti nakon kontrole za fiksni efekt destinacije. *R²* modela iznosi 0,546, no gotovo cjelokupna objašnjena varijacija odnosi se na međudestinacijsku heterogenost, a ne na temporalni trend. Drugim riječima, distribucija okvira u razdoblju od siječnja 2021. do svibnja 2024. ne pokazuje linearni trend ni prema turistifikaciji ni prema religijskoj retradicionalizaciji.
+
+Disagregirana usporedba pandemijskog razdoblja u 2021. i postpandemijskog razdoblja od 2022. do 2024. potvrđuje negativan nalaz na razini destinacija. Udio religijski isključivo okvira porastao je za pet ili više postotnih bodova u Sinju (+16 pb), Krasnom (+16 pb), Vepricu (+11 pb), Mariji Bistrici (+7 pb) i Aljmašu (+6 pb). Istodobno je pao u Trsatu (−13 pb), Ninu (−6 pb), Voćinu (−5 pb) i Solinu (−3 pb), dok je Ludbreg zadržao stabilnu poziciju (+2 pb). Smjer promjene očito ovisi o destinaciji, a ne o sustavnom vremenskom obrascu, što isključuje interpretaciju u kojoj bi pandemija inducirala uniforman okvirni pomak.
+
+Ovaj nalaz služi kao negativan dokaz. Post-pandemijska medijska komunikacija o hrvatskim katoličkim odredištima nije se, sustavno gledano, okrenula prema turističkom registru kako bi se moglo očekivati u kontekstu kampanja revitalizacije domaćeg turizma. Distribucija okvira u promatranom razdoblju ostaje strukturno stabilna, što memorijalnu razinu od 15 % iz §4.1 čini stabilnom karakteristikom medijskog diskursa o hrvatskim katoličkim svetištima, a ne tranzitnim pandemijskim artefaktom.
+
+# Rasprava
+
+TBD
+
+# Zaključak
+
+TBD
+
+# Literatura {.unnumbered}

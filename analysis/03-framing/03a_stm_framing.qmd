@@ -1,0 +1,1177 @@
+---
+title: "Phase 3a: Structural Topic Model for Discourse Framing"
+subtitle: "STM preprocessing, K selection, topic diagnostics, frame mapping, prevalence estimation"
+author: "DigiKat Destination Framing Sub-study"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    code-fold: false
+    theme: cosmo
+    self-contained: true
+execute:
+  warning: false
+  message: false
+  eval: true
+---
+
+# Design Notes
+
+Phase 3a fits a Structural Topic Model (STM) to the analytical corpus to
+discover latent discourse frames inductively. This complements the
+dictionary-based register classification from Phase 2c by allowing the
+data to surface frames the researcher did not anticipate.
+
+Seven components are produced.
+
+1. Text preprocessing: tokenisation, Croatian stopword removal,
+   trimming, and DFM construction via quanteda.
+2. K selection via held-out likelihood, semantic coherence, and
+   exclusivity across a range of candidate K values.
+3. Final model fit at the selected K with prevalence covariates
+   (destination, quarter, platform category).
+4. Topic diagnostics: top words by probability and FREX, topic
+   proportions, coherence-exclusivity scatter.
+5. Topic-to-frame labelling based on top words and exemplary documents.
+6. Prevalence estimation via estimateEffect() to test how topic
+   prevalence varies by destination, time, and platform.
+7. Convergent validity: comparison of STM-derived frames with the
+   dictionary-based register classification from Phase 2c.
+
+The primary text field is MENTION_SNIPPET (the contextual window around
+the destination mention). FULL_TEXT is available for robustness checks
+but is noisier because it includes content unrelated to the destination.
+
+
+## 0 Configuration
+
+```{r}
+#| label: config
+
+config_path <- "data/config_phase3a.rds"
+
+if (file.exists(config_path)) {
+  config <- readRDS(config_path)
+  cat("Phase 3a configuration loaded from disk.\n")
+} else {
+  config <- list(
+    phase_name    = "03a_stm_framing",
+    timestamp     = Sys.time(),
+    seed          = 2026L,
+
+    # -- Input paths --
+    input_paths = list(
+      corpus = "../02-descriptive/data/destinations_analytical_final.rds",
+      corpus_fallback = "../02-descriptive/data/destinations_analytical_cleaned.rds"
+    ),
+
+    # -- Output paths --
+    output_paths = list(
+      dfm            = "data/03a_dfm.rds",
+      searchK        = "data/03a_searchK.rds",
+      stm_model      = "data/03a_stm_model.rds",
+      stm_effect     = "data/03a_stm_effect.rds",
+      topic_labels   = "data/03a_topic_labels.rds",
+      topic_docs     = "data/03a_topic_exemplars.rds",
+      convergence    = "data/03a_convergence_check.rds",
+      config         = config_path,
+      metadata       = "output/metadata/meta_03a_stm_framing.rds"
+    ),
+
+    # -- Preprocessing parameters --
+    preprocessing = list(
+      text_field        = "MENTION_SNIPPET",
+      min_termfreq      = 10L,
+      max_docfreq_pct   = 0.90,
+      min_nchar         = 3L,
+      ngram_range       = c(1L, 2L),
+      extra_stopwords   = c(
+        "http", "https", "www", "com", "hr", "foto", "video",
+        "izvor", "objav", "članak", "preuz", "pročitajte", "više",
+        "klik", "nastavak", "tekst", "autor", "urednik",
+        "godina", "godine", "godinu", "godini", "dan", "dana",
+        "biti", "jest", "može", "trebati", "imati", "ići",
+        "sve", "svi", "koji", "koja", "koje", "kojeg", "kojoj",
+        "jedan", "jedna", "jedno", "dva", "tri", "prvi", "drugi",
+        "novi", "nova", "novo", "veliki", "velika", "veliko",
+        "već", "još", "samo", "također", "tako", "isto",
+        "danas", "jučer", "sutra", "sada", "ovdje", "gdje",
+        "ovaj", "ovog", "ovom", "taj", "tog", "tom",
+        "cijeli", "cijela", "cijelom", "svaki", "svaka", "svako",
+        "share", "tweet", "plus", "ispis", "print",
+        "facebook", "instagram", "twitter",
+        "kolačić", "kolačiće", "kolačića",
+        "kliknite", "messenger", "viber", "whatsapp",
+        "preuzeto", "objavljeno", "objavio"
+      )
+    ),
+
+    # -- K selection parameters --
+    k_selection = list(
+      k_range         = c(5L, 7L, 9L, 10L, 12L, 15L, 18L, 20L, 25L, 30L, 35L),
+      heldout_prop    = 0.10,
+      max_em_iter     = 150L
+    ),
+
+    # -- Final model parameters --
+    model = list(
+      K               = NULL,    # set after searchK
+      prevalence_formula = "~ destination + dest_type_cat + s(year_num) + feast_window",
+      max_em_iter     = 500L,
+      convergence_tol = 1e-5,
+      n_exemplars     = 15L
+    ),
+
+    # -- Dictionary paths --
+    dictionary_paths = list(
+      destinations = "../../dictionaries/destinations.csv",
+      registers    = "../../dictionaries/registers.csv",
+      stopwords_hr = NULL  # built-in quanteda stopwords("hr")
+    )
+  )
+  saveRDS(config, config_path)
+  cat("Phase 3a configuration saved.\n")
+}
+```
+
+
+## 1 Setup and Load Corpus
+
+```{r}
+#| label: setup
+
+library(data.table)
+library(stringi)
+library(quanteda)
+library(quanteda.textstats)
+library(stm)
+library(ggplot2)
+library(patchwork)
+library(knitr)
+library(digest)
+
+source("../../R/theme_reltur.R")
+source("../../R/decision_gate.R")
+source("../../R/metadata_snapshot.R")
+source("../../R/strip_boilerplate.R")
+source("../../R/join_dest_type.R")
+
+for (d in c("data", "data-raw", "output/tables", "output/figures",
+            "output/reports", "output/metadata")) {
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+}
+
+set.seed(config$seed)
+```
+
+```{r}
+#| label: load-corpus
+
+# Try loading in order of preference
+corpus_loaded <- FALSE
+for (p in config$input_paths) {
+  if (file.exists(p)) {
+    dt <- readRDS(p)
+    setDT(dt)
+    cat(sprintf("Loaded corpus from: %s\n", p))
+    cat(sprintf("  Rows: %s | Columns: %s\n", format(nrow(dt), big.mark = " "),
+                ncol(dt)))
+    corpus_loaded <- TRUE
+    break
+  }
+}
+stopifnot(corpus_loaded)
+dt <- dt[cleaning_action == "keep"]
+cat(sprintf("  After cleaning filter: %s rows\n", format(nrow(dt), big.mark = " ")))
+
+dt <- strip_boilerplate(dt)
+dt <- join_dest_type(dt)
+dt[, year_num := as.integer(format(date, "%Y")) - 2021L]
+if ("feast_name" %in% names(dt)) {
+  dt[, feast_window := as.integer(!is.na(feast_name))]
+} else if (!"feast_window" %in% names(dt)) {
+  dt[, feast_window := 0L]
+  cat("Note: feast_name not found; feast_window set to 0 for all rows.\n")
+}
+
+if (!"yearmonth" %in% names(dt))
+  dt[, yearmonth := as.Date(format(date, "%Y-%m-01"))]
+
+# Verify text field exists and is non-empty
+text_field <- config$preprocessing$text_field
+stopifnot(text_field %in% names(dt))
+
+n_missing_text <- sum(is.na(dt[[text_field]]) | dt[[text_field]] == "")
+cat(sprintf("Missing/empty %s: %d (%.1f%%)\n",
+            text_field, n_missing_text,
+            100 * n_missing_text / nrow(dt)))
+```
+
+
+## 2 Text Preprocessing
+
+```{r}
+#| label: preprocess-text
+
+# ---- 2.1 Build working copy with clean text ----
+stm_dt <- dt[!is.na(get(text_field)) & get(text_field) != ""]
+
+# Lowercase with Croatian locale
+stm_dt[, text_clean := stri_trans_tolower(get(text_field), locale = "hr")]
+
+# Remove URLs
+stm_dt[, text_clean := stri_replace_all_regex(text_clean, "https?://\\S+", " ")]
+
+# Remove email addresses
+stm_dt[, text_clean := stri_replace_all_regex(text_clean, "\\S+@\\S+\\.\\S+", " ")]
+
+# Remove HTML entities and tags
+stm_dt[, text_clean := stri_replace_all_regex(text_clean, "<[^>]+>", " ")]
+stm_dt[, text_clean := stri_replace_all_regex(text_clean, "&\\w+;", " ")]
+
+# Remove digits (but keep words containing digits like "covid19")
+stm_dt[, text_clean := stri_replace_all_regex(text_clean, "\\b\\d+\\b", " ")]
+
+# Normalise whitespace
+stm_dt[, text_clean := stri_replace_all_regex(text_clean, "\\s+", " ")]
+stm_dt[, text_clean := stri_trim_both(text_clean)]
+
+# Drop documents that became empty after cleaning
+n_before <- nrow(stm_dt)
+stm_dt <- stm_dt[stri_length(text_clean) >= 20L]
+cat(sprintf("Documents after text cleaning: %d (dropped %d short/empty)\n",
+            nrow(stm_dt), n_before - nrow(stm_dt)))
+```
+
+```{r}
+#| label: build-dfm
+
+# ---- 2.2 Croatian stopwords ----
+stopwords_hr <- quanteda::stopwords("hr", source = "stopwords-iso")
+extra_sw     <- config$preprocessing$extra_stopwords
+all_stopwords <- unique(c(stopwords_hr, extra_sw))
+cat(sprintf("Total stopwords: %d (ISO: %d + project: %d)\n",
+            length(all_stopwords), length(stopwords_hr), length(extra_sw)))
+
+# ---- 2.3 Quanteda corpus and tokenisation ----
+qcorp <- quanteda::corpus(stm_dt$text_clean,
+                          docvars = stm_dt[, .(pair_id, destination,
+                                               dest_type_cat, year_num,
+                                               feast_window, date, yearmonth,
+                                               has_religious_register,
+                                               has_tourism_register)])
+
+qtok <- quanteda::tokens(qcorp,
+                         remove_punct  = TRUE,
+                         remove_symbols = TRUE,
+                         remove_numbers = TRUE,
+                         remove_url     = TRUE) |>
+  quanteda::tokens_remove(all_stopwords, padding = FALSE) |>
+  quanteda::tokens_select(min_nchar = config$preprocessing$min_nchar)
+
+# ---- 2.4 Ngrams (unigrams + bigrams) ----
+if (config$preprocessing$ngram_range[2] > 1L) {
+  qtok_ngram <- quanteda::tokens_ngrams(qtok,
+                                        n = config$preprocessing$ngram_range[1]:
+                                            config$preprocessing$ngram_range[2])
+  # Combine unigrams and bigrams
+  qtok <- quanteda::tokens_compound(qtok,
+            quanteda::phrase(quanteda::featnames(
+              quanteda::dfm(qtok_ngram) |>
+                quanteda::dfm_trim(min_termfreq = config$preprocessing$min_termfreq * 2L)
+            )))
+}
+
+# ---- 2.5 Document-feature matrix ----
+raw_dfm <- quanteda::dfm(qtok)
+cat(sprintf("Raw DFM: %d docs x %d features\n", nrow(raw_dfm), ncol(raw_dfm)))
+
+# Trim rare and overly common terms
+trimmed_dfm <- quanteda::dfm_trim(
+  raw_dfm,
+  min_termfreq  = config$preprocessing$min_termfreq,
+  max_docfreq   = config$preprocessing$max_docfreq_pct,
+  docfreq_type  = "prop"
+)
+cat(sprintf("Trimmed DFM: %d docs x %d features\n",
+            nrow(trimmed_dfm), ncol(trimmed_dfm)))
+
+# Remove documents that became empty after trimming
+keep_docs <- quanteda::rowSums(trimmed_dfm) > 0
+trimmed_dfm <- trimmed_dfm[keep_docs, ]
+cat(sprintf("After removing empty docs: %d docs x %d features\n",
+            nrow(trimmed_dfm), ncol(trimmed_dfm)))
+```
+
+```{r}
+#| label: top-features
+
+# ---- 2.6 Inspect top features ----
+top50 <- quanteda::topfeatures(trimmed_dfm, n = 50)
+top_dt <- data.table(feature = names(top50), frequency = unname(top50))
+knitr::kable(top_dt, caption = "Top 50 features after preprocessing")
+```
+
+```{r}
+#| label: convert-stm
+
+# ---- 2.7 Convert to STM format ----
+# Build covariates for prevalence model
+doc_meta <- quanteda::docvars(trimmed_dfm)
+doc_meta <- as.data.table(doc_meta)
+
+# Quarter as numeric for spline (months since start)
+doc_meta[, quarter_num := as.numeric(difftime(yearmonth,
+           min(yearmonth, na.rm = TRUE), units = "days")) / 30.44]
+
+# Platform category (simplified)
+if ("SOURCE_TYPE" %in% names(stm_dt)) {
+  doc_meta[, platform_cat := stm_dt[keep_docs][["SOURCE_TYPE"]]]
+} else {
+  doc_meta[, platform_cat := "web"]
+}
+doc_meta[, platform_cat := fifelse(
+  platform_cat %in% c("web", "portal", "online"), "web",
+  fifelse(platform_cat %in% c("facebook", "twitter", "instagram",
+                               "reddit", "youtube"), "social",
+          "other"))]
+doc_meta[, platform_cat := as.factor(platform_cat)]
+doc_meta[, destination := as.factor(destination)]
+
+# New covariates from 02c enrichment
+if (!"dest_type_cat" %in% names(doc_meta)) {
+  doc_meta[, dest_type_cat := stm_dt[keep_docs][["dest_type_cat"]]]
+}
+doc_meta[, dest_type_cat := as.factor(dest_type_cat)]
+if (!"year_num" %in% names(doc_meta)) {
+  doc_meta[, year_num := stm_dt[keep_docs][["year_num"]]]
+}
+if (!"feast_window" %in% names(doc_meta)) {
+  doc_meta[, feast_window := stm_dt[keep_docs][["feast_window"]]]
+}
+doc_meta[is.na(feast_window), feast_window := 0L]
+
+stm_input <- quanteda::convert(trimmed_dfm, to = "stm")
+stm_input$meta <- as.data.frame(doc_meta)
+
+saveRDS(list(dfm = trimmed_dfm, stm_input = stm_input, doc_meta = doc_meta),
+        config$output_paths$dfm)
+cat("DFM and STM input saved.\n")
+```
+
+
+## 3 K Selection (searchK)
+
+```{r}
+#| label: searchK
+#| cache: true
+
+set.seed(config$seed)
+
+cat(sprintf("Running searchK for K = %s\n",
+            paste(config$k_selection$k_range, collapse = ", ")))
+cat("This may take 30-60 minutes depending on corpus size.\n")
+
+searchK_out <- stm::searchK(
+  documents  = stm_input$documents,
+  vocab      = stm_input$vocab,
+  K          = config$k_selection$k_range,
+  prevalence  = ~ destination + dest_type_cat + s(year_num) + feast_window,
+  data        = stm_input$meta,
+  heldout.seed = config$seed,
+  proportion   = config$k_selection$heldout_prop,
+  max.em.its   = config$k_selection$max_em_iter,
+  init.type    = "Spectral",
+  seed         = config$seed,
+  verbose      = TRUE
+)
+
+saveRDS(searchK_out, config$output_paths$searchK)
+cat("searchK results saved.\n")
+```
+
+```{r}
+#| label: plot-searchK
+
+# ---- 3.1 Extract and plot diagnostics ----
+# searchK returns list-columns; unlist them for plotting
+safe_unlist_numeric <- function(x) {
+  v <- unlist(x)
+  if (is.null(v)) return(rep(NA_real_, length(unlist(searchK_out$results$K))))
+  as.numeric(v)
+}
+
+sk <- data.table(
+  K        = as.integer(unlist(searchK_out$results$K)),
+  heldout  = safe_unlist_numeric(searchK_out$results$heldout),
+  semcoh   = safe_unlist_numeric(searchK_out$results$semcoh),
+  exclus   = safe_unlist_numeric(searchK_out$results$exclus),
+  residual = safe_unlist_numeric(searchK_out$results$residual)
+)
+
+# Held-out likelihood
+p_heldout <- ggplot(sk, aes(K, heldout)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2.5) +
+  labs(title = "Held-out Likelihood", x = "K", y = "Log likelihood") +
+  theme_reltur()
+
+# Semantic coherence
+p_coherence <- ggplot(sk, aes(K, semcoh)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2.5) +
+  labs(title = "Semantic Coherence", x = "K", y = "Coherence") +
+  theme_reltur()
+
+# Exclusivity (may be NA if searchK did not compute it)
+if (all(is.na(sk$exclus))) {
+  p_exclusivity <- ggplot(sk, aes(K, semcoh)) +
+    annotate("text", x = mean(sk$K), y = 0, label = "Exclusivity not available", size = 4) +
+    labs(title = "Exclusivity", x = "K", y = "") +
+    theme_reltur()
+} else {
+  p_exclusivity <- ggplot(sk, aes(K, exclus)) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 2.5) +
+    labs(title = "Exclusivity", x = "K", y = "Exclusivity") +
+    theme_reltur()
+}
+
+# Residuals
+p_residual <- ggplot(sk, aes(K, residual)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2.5) +
+  labs(title = "Residual Dispersion", x = "K", y = "Residuals") +
+  theme_reltur()
+
+p_searchK <- (p_heldout | p_coherence) / (p_exclusivity | p_residual) +
+  patchwork::plot_annotation(
+    title = "STM Model Selection Diagnostics",
+    subtitle = sprintf("Candidate K = {%s}",
+                        paste(config$k_selection$k_range, collapse = ", "))
+  )
+
+ggsave("output/figures/03a_searchK_diagnostics.png", p_searchK,
+       width = 12, height = 9, dpi = 300, bg = "white")
+p_searchK
+```
+
+```{r}
+#| label: select-K
+
+# ---- 3.2 Select K ----
+# Select K based on held-out likelihood peak and coherence-exclusivity trade-off
+# User should inspect the plots and may override this selection
+best_idx <- which.max(sk$heldout)
+selected_K <- sk$K[best_idx]
+cat(sprintf("\nAutomatic K selection (max held-out): K = %d\n", selected_K))
+cat("Review the diagnostic plots above. Override config$model$K if needed.\n")
+
+# Update config
+config$model$K <- selected_K
+saveRDS(config, config$output_paths$config)
+```
+
+
+## 4 Fit Final Model
+
+```{r}
+#| label: fit-stm
+#| cache: true
+
+set.seed(config$seed)
+
+K_final <- config$model$K
+cat(sprintf("Fitting final STM with K = %d\n", K_final))
+
+stm_fit <- stm::stm(
+  documents    = stm_input$documents,
+  vocab        = stm_input$vocab,
+  K            = K_final,
+  prevalence   = ~ destination + dest_type_cat + s(year_num) + feast_window,
+  data         = stm_input$meta,
+  max.em.its   = config$model$max_em_iter,
+  emtol        = config$model$convergence_tol,
+  init.type    = "Spectral",
+  seed         = config$seed,
+  verbose      = TRUE
+)
+
+saveRDS(stm_fit, config$output_paths$stm_model)
+cat("STM model saved.\n")
+
+# Check convergence
+cat(sprintf("Converged: %s (iterations: %d)\n",
+            stm_fit$convergence$converged,
+            length(stm_fit$convergence$bound)))
+```
+
+
+## 5 Topic Diagnostics
+
+```{r}
+#| label: topic-top-words
+
+# ---- 5.1 Top words by Prob and FREX ----
+top_words_prob <- stm::labelTopics(stm_fit, n = 15)
+
+# Build tidy table
+topics_dt <- rbindlist(lapply(1:K_final, function(k) {
+  data.table(
+    topic    = k,
+    rank     = 1:15,
+    prob     = top_words_prob$prob[k, ],
+    frex     = top_words_prob$frex[k, ],
+    lift     = top_words_prob$lift[k, ],
+    score    = top_words_prob$score[k, ]
+  )
+}))
+
+# Display concise version (top 10)
+topics_wide <- dcast(
+  topics_dt[rank <= 10],
+  topic ~ rank,
+  value.var = "frex"
+)
+setnames(topics_wide, c("Topic", paste0("FREX_", 1:10)))
+knitr::kable(topics_wide, caption = "Top 10 FREX words per topic")
+```
+
+```{r}
+#| label: topic-top-words-prob
+
+topics_wide_prob <- dcast(
+  topics_dt[rank <= 10],
+  topic ~ rank,
+  value.var = "prob"
+)
+setnames(topics_wide_prob, c("Topic", paste0("Prob_", 1:10)))
+knitr::kable(topics_wide_prob, caption = "Top 10 Highest Probability words per topic")
+```
+
+```{r}
+#| label: topic-proportions
+
+# ---- 5.2 Topic proportions ----
+theta <- stm_fit$theta  # doc x topic matrix
+topic_means <- colMeans(theta)
+topic_sds   <- apply(theta, 2, sd)
+
+prop_dt <- data.table(
+  topic      = 1:K_final,
+  mean_prop  = topic_means,
+  sd_prop    = topic_sds,
+  median_prop = apply(theta, 2, median),
+  max_prop   = apply(theta, 2, max)
+)
+
+# Flag potentially problematic topics
+prop_dt[, flag := fifelse(mean_prop < 0.02, "SMALL",
+                   fifelse(mean_prop > 0.25, "BROAD", "OK"))]
+
+knitr::kable(prop_dt[order(-mean_prop)], digits = 4,
+             caption = "Topic proportion summary")
+
+# Plot
+p_prop <- ggplot(prop_dt, aes(x = reorder(factor(topic), -mean_prop),
+                               y = mean_prop)) +
+  geom_col(fill = "#4A90D9", alpha = 0.8) +
+  geom_errorbar(aes(ymin = mean_prop - sd_prop,
+                    ymax = mean_prop + sd_prop),
+                width = 0.3, linewidth = 0.4) +
+  geom_hline(yintercept = 1 / K_final, linetype = "dashed", color = "red") +
+  labs(title = sprintf("Topic Proportions (K = %d)", K_final),
+       subtitle = "Red line = uniform distribution; bars = mean +/- SD",
+       x = "Topic", y = "Mean proportion") +
+  theme_reltur()
+
+ggsave("output/figures/03a_topic_proportions.png", p_prop,
+       width = 10, height = 6, dpi = 300, bg = "white")
+p_prop
+```
+
+```{r}
+#| label: coherence-exclusivity
+
+# ---- 5.3 Coherence vs Exclusivity scatter ----
+coh <- stm::semanticCoherence(stm_fit, stm_input$documents)
+exc <- stm::exclusivity(stm_fit)
+
+ce_dt <- data.table(topic = 1:K_final, coherence = coh, exclusivity = exc)
+
+p_ce <- ggplot(ce_dt, aes(coherence, exclusivity, label = topic)) +
+  geom_point(size = 3, color = "#4A90D9") +
+  geom_text(vjust = -0.8, size = 3.5) +
+  labs(title = "Semantic Coherence vs Exclusivity",
+       subtitle = sprintf("K = %d | Top-right = ideal topics", K_final),
+       x = "Semantic Coherence", y = "Exclusivity") +
+  theme_reltur()
+
+ggsave("output/figures/03a_coherence_exclusivity.png", p_ce,
+       width = 8, height = 6, dpi = 300, bg = "white")
+p_ce
+```
+
+```{r}
+#| label: topic-correlation
+
+# ---- 5.4 Topic correlation network ----
+topic_corr <- stm::topicCorr(stm_fit, method = "simple", verbose = FALSE)
+
+corr_mat <- topic_corr$cor
+corr_dt <- as.data.table(as.table(corr_mat))
+setnames(corr_dt, c("topic_a", "topic_b", "correlation"))
+corr_dt[, topic_a := as.integer(topic_a)]
+corr_dt[, topic_b := as.integer(topic_b)]
+corr_dt <- corr_dt[topic_a < topic_b & abs(correlation) > 0.05]
+
+if (nrow(corr_dt) > 0) {
+  knitr::kable(corr_dt[order(-abs(correlation))][1:min(20, .N)],
+               digits = 3,
+               caption = "Top topic-topic correlations (|r| > 0.05)")
+} else {
+  cat("No strong topic correlations detected.\n")
+}
+```
+
+
+## 6 Exemplary Documents
+
+```{r}
+#| label: exemplars
+
+# ---- 6.1 Find exemplary documents per topic ----
+n_exemplars <- config$model$n_exemplars
+
+exemplar_list <- lapply(1:K_final, function(k) {
+  # Documents with highest theta for this topic
+  top_idx <- order(theta[, k], decreasing = TRUE)[1:n_exemplars]
+
+  data.table(
+    topic    = k,
+    rank     = 1:n_exemplars,
+    doc_idx  = top_idx,
+    theta_k  = theta[top_idx, k],
+    pair_id  = stm_input$meta$pair_id[top_idx],
+    destination = stm_input$meta$destination[top_idx],
+    text     = stm_dt[keep_docs][top_idx][[text_field]]
+  )
+})
+
+exemplars_dt <- rbindlist(exemplar_list)
+saveRDS(exemplars_dt, config$output_paths$topic_docs)
+
+# Show top 3 per topic (truncated text)
+exemplars_dt[rank <= 3, .(topic, rank, destination,
+  theta_k = round(theta_k, 3),
+  text_snippet = stri_sub(text, 1, 120))] |>
+  knitr::kable(caption = "Top 3 exemplary documents per topic (truncated)")
+```
+
+
+## 7 Topic-Frame Labelling
+
+```{r}
+#| label: topic-labels
+
+# ---- 7.1 Automated label suggestion ----
+# Combine FREX words + destination affinity to suggest labels
+# This is a starting point; manual refinement is expected
+
+dest_topic_prop <- as.data.table(stm_input$meta)[, destination := as.character(destination)]
+dest_topic_prop <- cbind(dest_topic_prop, as.data.table(theta))
+
+# Mean theta per destination per topic
+dest_aff <- dest_topic_prop[, lapply(.SD, mean),
+  by = destination,
+  .SDcols = paste0("V", 1:K_final)]
+
+dest_aff_long <- melt(dest_aff, id.vars = "destination",
+                       variable.name = "topic", value.name = "mean_theta")
+dest_aff_long[, topic := as.integer(stri_replace_first_fixed(topic, "V", ""))]
+
+# For each topic, which destinations have above-average prevalence?
+dest_aff_long[, overall_mean := mean(mean_theta), by = topic]
+dest_aff_long[, above_avg := mean_theta > overall_mean * 1.2]
+
+top_dests_per_topic <- dest_aff_long[above_avg == TRUE,
+  .(top_destinations = paste(destination, collapse = ", ")),
+  by = topic]
+
+# Combine with top words for label suggestion
+label_dt <- merge(
+  topics_dt[rank <= 5, .(top_frex = paste(frex, collapse = ", ")), by = topic],
+  top_dests_per_topic,
+  by = "topic", all.x = TRUE
+)
+
+# Register affinity: what share of each topic's documents have religious/tourism register?
+register_aff <- dest_topic_prop[, {
+  reg_rel <- has_religious_register
+  reg_tour <- has_tourism_register
+  lapply(1:K_final, function(k) {
+    w <- get(paste0("V", k))
+    list(
+      pct_religious = weighted.mean(reg_rel, w, na.rm = TRUE),
+      pct_tourism   = weighted.mean(reg_tour, w, na.rm = TRUE)
+    )
+  })
+}]
+
+# Simpler approach: per-document dominant topic, then register percentages
+dom_topic <- apply(theta, 1, which.max)
+reg_dt <- data.table(
+  dom_topic = dom_topic,
+  has_rel   = stm_input$meta$has_religious_register,
+  has_tour  = stm_input$meta$has_tourism_register
+)
+reg_summary <- reg_dt[, .(
+  n         = .N,
+  pct_rel   = 100 * mean(has_rel, na.rm = TRUE),
+  pct_tour  = 100 * mean(has_tour, na.rm = TRUE)
+), by = dom_topic]
+setnames(reg_summary, "dom_topic", "topic")
+
+label_dt <- merge(label_dt, reg_summary, by = "topic", all.x = TRUE)
+
+# Suggest frame category based on register prevalence
+label_dt[, suggested_frame := fifelse(
+  pct_rel > 60 & pct_tour < 30, "religijski",
+  fifelse(pct_tour > 60 & pct_rel < 30, "turistički",
+  fifelse(pct_rel > 40 & pct_tour > 40, "mješoviti_religijsko-turistički",
+  fifelse(pct_rel < 30 & pct_tour < 30, "opći/politički",
+          "neodređeno"))))]
+
+knitr::kable(label_dt, digits = 1,
+             caption = "Topic label suggestions (automated; requires manual review)")
+
+saveRDS(label_dt, config$output_paths$topic_labels)
+```
+
+```{r}
+#| label: dest-topic-heatmap
+
+# ---- 7.2 Destination × Topic heatmap ----
+dest_aff_wide <- dcast(dest_aff_long, destination ~ topic, value.var = "mean_theta")
+
+# Normalise per topic for better visualisation
+dest_aff_norm <- melt(dest_aff_long[, .(destination, topic,
+  norm_theta = (mean_theta - min(mean_theta)) /
+               (max(mean_theta) - min(mean_theta) + 1e-10)),
+  by = topic], id.vars = c("destination", "topic"),
+  measure.vars = "norm_theta")
+
+p_heatmap <- ggplot(dest_aff_long,
+       aes(x = factor(topic), y = destination, fill = mean_theta)) +
+  geom_tile(color = "white", linewidth = 0.3) +
+  geom_text(aes(label = sprintf("%.2f", mean_theta)), size = 2.8) +
+  scale_fill_gradient2(low = "white", mid = "#C6DBEF", high = "#08519C",
+                       midpoint = 1 / K_final,
+                       name = "Mean \u03B8") +
+  labs(title = "Topic Prevalence by Destination",
+       subtitle = "Mean document-topic proportion per destination",
+       x = "Topic", y = NULL) +
+  theme_reltur() +
+  theme(axis.text.y = element_text(size = 10))
+
+ggsave("output/figures/03a_dest_topic_heatmap.png", p_heatmap,
+       width = max(10, K_final * 0.8), height = 7, dpi = 300, bg = "white")
+p_heatmap
+```
+
+
+## 8 Prevalence Estimation
+
+```{r}
+#| label: estimate-effect
+#| cache: true
+
+# ---- 8.1 estimateEffect for destination and time ----
+set.seed(config$seed)
+
+effect_fit <- stm::estimateEffect(
+  formula   = 1:K_final ~ destination + dest_type_cat + s(year_num) + feast_window,
+  stmobj    = stm_fit,
+  metadata  = stm_input$meta,
+  uncertainty = "Global"
+)
+
+saveRDS(effect_fit, config$output_paths$stm_effect)
+cat("estimateEffect saved.\n")
+
+# Feast window effect
+effect_feast <- stm::estimateEffect(
+  formula     = 1:K_final ~ feast_window,
+  stmobj      = stm_fit,
+  metadata    = stm_input$meta,
+  uncertainty = "Global"
+)
+saveRDS(effect_feast, "data/03a_stm_effect_feast.rds")
+
+# Year trend effect
+effect_year <- stm::estimateEffect(
+  formula     = 1:K_final ~ s(year_num),
+  stmobj      = stm_fit,
+  metadata    = stm_input$meta,
+  uncertainty = "Global"
+)
+saveRDS(effect_year, "data/03a_stm_effect_year.rds")
+cat("Feast and year effects saved.\n")
+```
+
+```{r}
+#| label: plot-destination-effects
+
+# ---- 8.2 Destination effects for each topic ----
+# Extract destination coefficients
+dest_effects <- lapply(1:K_final, function(k) {
+  summ <- summary(effect_fit, topics = k)
+  coef_table <- summ$tables[[1]]
+  coef_dt <- as.data.table(coef_table, keep.rownames = "term")
+  coef_dt[, topic := k]
+  coef_dt
+})
+dest_effects_dt <- rbindlist(dest_effects)
+setnames(dest_effects_dt, c("term", "estimate", "se", "t_val", "p_val", "topic"))
+
+# Filter to destination terms only
+dest_coefs <- dest_effects_dt[stri_detect_regex(term, "^destination")]
+dest_coefs[, destination := stri_replace_first_fixed(term, "destination", "")]
+
+# Significance markers
+dest_coefs[, sig := fifelse(p_val < 0.001, "***",
+                    fifelse(p_val < 0.01, "**",
+                    fifelse(p_val < 0.05, "*", "")))]
+
+# Save table
+fwrite(dest_coefs, "output/tables/03a_destination_effects.csv")
+
+# Plot top topics (those with most destination variation)
+dest_var <- dest_coefs[, .(dest_range = max(estimate) - min(estimate)), by = topic]
+top_varying <- dest_var[order(-dest_range)][1:min(6, K_final)]$topic
+
+p_dest_list <- lapply(top_varying, function(k) {
+  plot_dt <- dest_coefs[topic == k]
+  ggplot(plot_dt, aes(x = reorder(destination, estimate), y = estimate)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+    geom_pointrange(aes(ymin = estimate - 1.96 * se,
+                        ymax = estimate + 1.96 * se),
+                    color = "#4A90D9", size = 0.5) +
+    coord_flip() +
+    labs(title = sprintf("Topic %d", k),
+         x = NULL, y = "Coefficient") +
+    theme_reltur(base_size = 9)
+})
+
+p_dest_effects <- patchwork::wrap_plots(p_dest_list, ncol = 3) +
+  patchwork::plot_annotation(
+    title = "Destination Effects on Topic Prevalence",
+    subtitle = "Coefficients with 95% CI (reference: aljmas)"
+  )
+
+ggsave("output/figures/03a_destination_effects.png", p_dest_effects,
+       width = 14, height = max(6, length(top_varying) * 2), dpi = 300, bg = "white")
+p_dest_effects
+```
+
+```{r}
+#| label: plot-feast-effects
+
+# ---- 8.3 Feast window effects ----
+feast_effects <- rbindlist(lapply(seq_len(K_final), function(k) {
+  e <- summary(effect_feast)$tables[[k]]
+  data.table(
+    topic = k,
+    est   = e["feast_window", "Estimate"],
+    se    = e["feast_window", "Std. Error"]
+  )
+}))
+feast_effects[, sig := abs(est) > 1.96 * se]
+
+p_feast <- ggplot(feast_effects,
+    aes(x = reorder(factor(topic), est), y = est, colour = sig)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = est - 1.96 * se, ymax = est + 1.96 * se),
+                width = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  coord_flip() +
+  scale_colour_manual(values = c("TRUE" = "#B2182B", "FALSE" = "grey60")) +
+  labs(x = "Topic", y = "Feast window effect (\u03B8 change)",
+       colour = "Significant",
+       title = "Feast Window Effect on Topic Prevalence") +
+  theme_reltur()
+
+ggsave("output/figures/03a_feast_effects.png", p_feast,
+       width = 14, height = 14, dpi = 300, bg = "white")
+p_feast
+```
+
+```{r}
+#| label: plot-temporal-effects
+
+# ---- 8.4 Temporal trends for selected topics ----
+p_time_list <- lapply(1:min(K_final, 12), function(k) {
+  stm::plot.estimateEffect(effect_year, covariate = "year_num",
+                           topics = k, method = "continuous",
+                           model = stm_fit,
+                           main = sprintf("Topic %d", k),
+                           xlab = "Years since 2021",
+                           ylab = "Topic proportion")
+})
+# Note: stm::plot.estimateEffect writes to current device;
+# for publication figures we extract the data manually
+
+cat("Temporal effect plots generated (see HTML output).\n")
+```
+
+
+## 9 Convergent Validity: STM vs Register-Based Frames
+
+```{r}
+#| label: convergent-validity
+
+# ---- 9.1 Map STM topics to register-based frames ----
+# Dominant topic per document
+dom_topic <- apply(theta, 1, which.max)
+
+# Merge with register-based classification
+valid_dt <- data.table(
+  pair_id   = stm_input$meta$pair_id,
+  stm_topic = dom_topic,
+  has_rel   = stm_input$meta$has_religious_register,
+  has_tour  = stm_input$meta$has_tourism_register
+)
+
+# Reconstruct register-based frame
+valid_dt[, register_frame := fifelse(
+  has_rel & !has_tour, "religious_only",
+  fifelse(!has_rel & has_tour, "tourism_only",
+  fifelse(has_rel & has_tour, "religious_tourism_mixed",
+          "neither")))]
+
+# Cross-tabulation: STM topic × register frame
+cross_tab <- valid_dt[, .N, by = .(stm_topic, register_frame)]
+cross_wide <- dcast(cross_tab, stm_topic ~ register_frame, value.var = "N", fill = 0)
+
+knitr::kable(cross_wide,
+             caption = "Cross-tabulation: STM dominant topic vs register-based frame")
+
+fwrite(cross_wide, "output/tables/03a_stm_vs_register_crosstab.csv")
+
+# ---- 9.2 Agreement metrics ----
+# For each STM topic, what is its modal register frame?
+topic_modal <- valid_dt[, .(
+  n = .N,
+  modal_frame = register_frame[which.max(tabulate(match(register_frame,
+                  unique(register_frame))))],
+  purity = max(tabulate(match(register_frame, unique(register_frame)))) / .N
+), by = stm_topic][order(stm_topic)]
+
+knitr::kable(topic_modal, digits = 3,
+             caption = "STM topic purity against register-based frames")
+
+# Overall agreement: % of documents where STM modal-frame matches register frame
+valid_dt <- merge(valid_dt, topic_modal[, .(stm_topic, modal_frame)],
+                  by = "stm_topic")
+valid_dt[, agree := register_frame == modal_frame]
+agreement_pct <- 100 * mean(valid_dt$agree, na.rm = TRUE)
+cat(sprintf("\nOverall agreement (STM dominant topic → register frame): %.1f%%\n",
+            agreement_pct))
+
+# ---- 9.3 Adjusted Rand Index ----
+if (requireNamespace("mclust", quietly = TRUE)) {
+  ari <- mclust::adjustedRandIndex(valid_dt$stm_topic, valid_dt$register_frame)
+  cat(sprintf("Adjusted Rand Index: %.3f\n", ari))
+} else {
+  ari <- NA_real_
+  cat("mclust not available; skipping ARI.\n")
+}
+
+convergence_results <- list(
+  cross_tab     = cross_wide,
+  topic_purity  = topic_modal,
+  agreement_pct = agreement_pct,
+  ari           = ari
+)
+saveRDS(convergence_results, config$output_paths$convergence)
+```
+
+```{r}
+#| label: convergence-heatmap
+
+# ---- 9.4 Visualise convergence ----
+conv_long <- melt(cross_wide, id.vars = "stm_topic",
+                  variable.name = "register_frame", value.name = "count")
+
+# Normalise within each topic (row-wise)
+conv_long[, topic_total := sum(count), by = stm_topic]
+conv_long[, pct := 100 * count / topic_total]
+
+p_conv <- ggplot(conv_long, aes(x = register_frame, y = factor(stm_topic),
+                                 fill = pct)) +
+  geom_tile(color = "white", linewidth = 0.3) +
+  geom_text(aes(label = sprintf("%.0f%%", pct)), size = 3) +
+  scale_fill_gradient(low = "white", high = "#2171B5", name = "% of topic") +
+  labs(title = "STM Topic vs Register-Based Frame",
+       subtitle = "Row-normalised: distribution of register frames within each STM topic",
+       x = "Register-based frame", y = "STM Topic") +
+  theme_reltur() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+ggsave("output/figures/03a_convergence_heatmap.png", p_conv,
+       width = 10, height = max(6, K_final * 0.5), dpi = 300, bg = "white")
+p_conv
+```
+
+
+## 10 Quality Profile and Summary
+
+```{r}
+#| label: summary-table
+
+# ---- 10.1 Consolidated topic summary ----
+summary_dt <- merge(prop_dt, ce_dt, by = "topic")
+summary_dt <- merge(summary_dt, label_dt[, .(topic, top_frex, suggested_frame,
+                                              pct_rel, pct_tour, n)],
+                    by = "topic", all.x = TRUE)
+summary_dt <- merge(summary_dt, topic_modal[, .(stm_topic, modal_frame, purity)],
+                    by.x = "topic", by.y = "stm_topic", all.x = TRUE)
+
+# Save
+fwrite(summary_dt, "output/tables/03a_topic_summary.csv")
+knitr::kable(summary_dt[order(-mean_prop)],
+             digits = 3,
+             caption = "Consolidated topic summary: proportion, coherence, exclusivity, register affinity, purity")
+```
+
+```{r}
+#| label: save-tables
+
+# ---- 10.2 Save all output tables ----
+fwrite(topics_dt, "output/tables/03a_topic_words.csv")
+fwrite(prop_dt, "output/tables/03a_topic_proportions.csv")
+fwrite(ce_dt, "output/tables/03a_coherence_exclusivity.csv")
+fwrite(dest_aff_long, "output/tables/03a_destination_topic_affinity.csv")
+
+cat("All output tables saved to output/tables/.\n")
+```
+
+
+## 11 Decision Gate
+
+```{r}
+#| label: gate
+
+gate_checks <- list(
+
+  convergence = function() {
+    if (stm_fit$convergence$converged) {
+      list(status = "PASS",
+           message = sprintf("Model converged in %d iterations",
+                             length(stm_fit$convergence$bound)))
+    } else {
+      list(status = "CAUTION",
+           message = sprintf("Model did NOT converge after %d iterations",
+                             config$model$max_em_iter))
+    }
+  },
+
+  no_degenerate_topics = function() {
+    tiny <- sum(prop_dt$mean_prop < 0.01)
+    if (tiny == 0) {
+      list(status = "PASS", message = "No topics below 1% mean proportion")
+    } else {
+      list(status = "CAUTION",
+           message = sprintf("%d topics below 1%% mean proportion", tiny))
+    }
+  },
+
+  no_dominant_topics = function() {
+    huge <- sum(prop_dt$mean_prop > 0.30)
+    if (huge == 0) {
+      list(status = "PASS", message = "No topics above 30% mean proportion")
+    } else {
+      list(status = "CAUTION",
+           message = sprintf("%d topics above 30%% mean proportion", huge))
+    }
+  },
+
+  min_purity = function() {
+    min_pur <- min(topic_modal$purity, na.rm = TRUE)
+    if (min_pur >= 0.40) {
+      list(status = "PASS",
+           message = sprintf("Minimum topic purity: %.1f%%", 100 * min_pur))
+    } else {
+      list(status = "CAUTION",
+           message = sprintf("Low purity topic detected: %.1f%%", 100 * min_pur))
+    }
+  },
+
+  register_agreement = function() {
+    if (agreement_pct >= 50) {
+      list(status = "PASS",
+           message = sprintf("STM-register agreement: %.1f%%", agreement_pct))
+    } else {
+      list(status = "CAUTION",
+           message = sprintf("Low STM-register agreement: %.1f%%", agreement_pct))
+    }
+  },
+
+  corpus_coverage = function() {
+    pct_used <- 100 * nrow(trimmed_dfm) / nrow(dt)
+    if (pct_used >= 80) {
+      list(status = "PASS",
+           message = sprintf("%.1f%% of corpus retained after preprocessing", pct_used))
+    } else {
+      list(status = "CAUTION",
+           message = sprintf("Only %.1f%% of corpus retained", pct_used))
+    }
+  }
+)
+
+gate_results <- run_decision_gate(gate_checks)
+```
+
+
+## 12 Metadata Snapshot
+
+```{r}
+#| label: metadata
+
+output_files <- c(
+  config$output_paths$dfm,
+  config$output_paths$stm_model,
+  config$output_paths$stm_effect,
+  config$output_paths$topic_labels,
+  config$output_paths$topic_docs,
+  config$output_paths$convergence,
+  "output/tables/03a_topic_summary.csv",
+  "output/tables/03a_topic_words.csv",
+  "output/tables/03a_destination_effects.csv",
+  "output/figures/03a_searchK_diagnostics.png",
+  "output/figures/03a_topic_proportions.png",
+  "output/figures/03a_coherence_exclusivity.png",
+  "output/figures/03a_dest_topic_heatmap.png",
+  "output/figures/03a_destination_effects.png",
+  "output/figures/03a_convergence_heatmap.png"
+)
+
+# Only checksum files that exist
+output_files <- output_files[file.exists(output_files)]
+
+metadata_snapshot(
+  phase_name       = config$phase_name,
+  config           = config,
+  gate_results     = gate_results,
+  output_files     = output_files,
+  dictionary_files = unlist(config$dictionary_paths[!sapply(config$dictionary_paths, is.null)]),
+  notes = sprintf(
+    "STM K=%d fitted on %s field. %d docs, %d features. Agreement with register frames: %.1f%%.",
+    K_final, config$preprocessing$text_field,
+    nrow(trimmed_dfm), ncol(trimmed_dfm), agreement_pct
+  )
+)
+
+cat("\n=== Phase 3a complete ===\n")
+```

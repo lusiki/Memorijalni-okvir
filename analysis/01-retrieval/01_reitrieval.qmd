@@ -1,0 +1,737 @@
+---
+title: "Phase 1: Retrieval of Religious Tourism Destination Corpus"
+subtitle: "Per-destination matching with context gate, religious register tagging"
+author: "DigiKat Destination Framing Sub-study"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    code-fold: false
+    theme: cosmo
+    self-contained: true
+execute:
+  warning: false
+  message: false
+  eval: true
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(duckdb)
+library(DBI)
+library(data.table)
+library(stringi)
+library(ggplot2)
+library(knitr)
+library(patchwork)
+
+dirs <- c("data-raw", "data", "output", "output/tables", "output/figures",
+          "output/reports", "dictionaries", "R")
+for (d in dirs) if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+```
+
+# Design Notes
+
+The retrieval pipeline extracts a destination-level working corpus from the
+Determ database of Croatian digital media (2021 to May 2024). Key design
+choices are documented in the companion file `01_retrieval_logic.md`. The
+summary of decisions implemented here is as follows.
+
+1. Matching uses TITLE and MENTION_SNIPPET only, not FULL_TEXT. FULL_TEXT
+   is retrieved for downstream text modelling but is not a filter target.
+2. Each destination is queried separately. Results are assembled into a
+   long-format table where each row is one article-destination pair.
+3. Polysemic destinations (Sinj, Nin, Solin, Krasno, Ludbreg) are subject
+   to a context gate. Matching requires both a destination pattern match
+   and a context trigger match in the same article (TITLE or snippet).
+4. Unambiguous destinations (Marija Bistrica, Trsat, Aljmaš, Voćin, Vepric)
+   are matched without a context gate.
+5. Religious, tourism, and scandal registers are tagged on FULL_TEXT after
+   retrieval, as binary indicators for downstream framing analysis.
+6. All cases are applied in full for case-sensitive Croatian morphology.
+
+# 0. Configuration
+
+```{r}
+#| label: config
+
+config <- list(
+  duckdb_path       = "C:/Users/lsikic/Luka C/DetermDB/determDB.duckdb",
+  db_memory_limit   = "48GB",
+  seed              = 2026L,
+  analysis_start    = as.Date("2021-01-01"),
+  analysis_end      = as.Date("2024-05-31"),
+  language_filter   = c("hr", "bs"),
+  min_articles_stm  = 300L,
+  min_articles_desc = 50L,
+  minimum_months    = 41L
+)
+saveRDS(config, "data/config_destinations.rds")
+cat("Config saved. Analysis window:", format(config$analysis_start),
+    "to", format(config$analysis_end), "\n")
+```
+
+# 1. Destination Dictionary
+
+Each destination has a name, a type classification, a vector of ILIKE
+patterns covering Croatian case forms and common shrine naming variants,
+a flag indicating whether the context gate applies, and a vector of
+context triggers (used only when the gate applies).
+
+```{r}
+#| label: destination-dictionary
+
+destinations <- list(
+
+  marija_bistrica = list(
+    type = "nacionalno_marijansko",
+    context_required = FALSE,
+    patterns = c(
+      "marija bistric",          # Marija Bistrica, Mariji Bistrici etc
+      "mariju bistricu",
+      "marije bistrice",
+      "marijom bistricom",
+      "bistričk",                # bistrička Gospa, bistričkog svetišta
+      "majka božja bistrička",
+      "majke božje bistričke",
+      "majku božju bistričku"
+    ),
+    context_triggers = character(0)
+  ),
+
+  trsat = list(
+    type = "nacionalno_marijansko",
+    context_required = FALSE,
+    patterns = c(
+      "trsat",                   # Trsat, Trsata, Trsatu, Trsatom
+      "trsatsk",                 # trsatski, trsatska, trsatsko
+      "gospa trsatsk",
+      "gospu trsatsk",
+      "gospe trsatsk",
+      "gospom trsatsk",
+      "majka božja trsatsk"
+    ),
+    context_triggers = character(0)
+  ),
+
+  sinj = list(
+    type = "nacionalno_marijansko",
+    context_required = TRUE,
+    patterns = c(
+      "sinj",                    # Sinj, Sinja, Sinju, Sinjem
+      "sinjsk",                  # sinjska, sinjsko, sinjski, sinjskoga
+      "alka",                    # Alka, Alke, Alku, Alkom
+      "alkar"                    # alkari, alkara
+    ),
+    context_triggers = c(
+      "gospa", "svetiš", "hodočast", "marij", "sveta",
+      "čudotvor", "kip", "slik", "crkv", "fratri", "franjev",
+      "alka", "alkar", "tradicij", "procesij", "cetinsk"
+    )
+  ),
+
+  aljmas = list(
+    type = "lokalno_marijansko",
+    context_required = FALSE,
+    patterns = c(
+      "aljmaš",
+      "aljmaša",
+      "aljmašu",
+      "aljmašem",
+      "aljmašk",                 # aljmaška Gospa
+      "gospa aljmašk",
+      "gospe aljmašk",
+      "gospu aljmašk",
+      "utočišt",                 # Gospa Utočišta grešnika (aljmaški titular)
+      "majka božja aljmašk"
+    ),
+    context_triggers = character(0)
+  ),
+
+  ludbreg = list(
+    type = "lokalno_marijansko",
+    context_required = TRUE,
+    patterns = c(
+      "ludbreg",                 # Ludbreg, Ludbrega, Ludbregu
+      "ludbrešk",                # ludbreški, ludbreška, ludbreškom
+      "ludbrešku"
+    ),
+    context_triggers = c(
+      "sveta krv", "svete krvi", "svetu krv", "svetom krvi",
+      "euharistij", "čudo", "čuda", "čudesn",
+      "svetiš", "hodočast", "marij", "procesij",
+      "relikvij", "marijansk"
+    )
+  ),
+
+  krasno = list(
+    type = "lokalno_marijansko",
+    context_required = TRUE,
+    patterns = c(
+      "krasn",                   # Krasno, Krasna, Krasnu, Krasnom
+      "krasnarsk"                # rare variant
+    ),
+    context_triggers = c(
+      "gospa od krasn", "gospe od krasn", "gospu od krasn", "gospom od krasn",
+      "senjsk", "marijansk", "svetiš", "hodočast",
+      "hrvatsko svetišt", "velebit"
+    )
+  ),
+
+  vocin = list(
+    type = "lokalno_marijansko",
+    context_required = FALSE,
+    patterns = c(
+      "voćin",                   # Voćin, Voćina, Voćinu, Voćinom
+      "voćinsk",                 # voćinska Gospa
+      "gospa voćinsk",
+      "gospe voćinsk",
+      "gospu voćinsk",
+      "gospom voćinsk",
+      "majka božja voćinsk"
+    ),
+    context_triggers = character(0)
+  ),
+
+  vepric = list(
+    type = "lokalno_marijansko",
+    context_required = FALSE,
+    patterns = c(
+      "vepric",                  # Vepric, Veprica, Vepricu
+      "veprič",                  # veprički
+      "gospa od lurda",          # Vepric is known as Croatian Lourdes
+      "gospe od lurda",
+      "gospu od lurda",
+      "hrvatski lurd"
+    ),
+    context_triggers = character(0)
+  ),
+
+  nin = list(
+    type = "nemarijansko",
+    context_required = TRUE,
+    patterns = c(
+      "nin",                     # Nin, Nina, Ninu, Ninom
+      "ninsk",                   # ninska, ninski, ninsko
+      "ninskim"
+    ),
+    context_triggers = c(
+      "tavelić", "nikola tavel",
+      "bazilik", "katedral",
+      "starohrvatsk", "hrvatsk", "branimir", "tomislav",
+      "svet", "crkv", "biskup",
+      "gospa", "hodočast",
+      "zavjet", "krunidb"
+    )
+  ),
+
+  solin = list(
+    type = "nemarijansko",
+    context_required = TRUE,
+    patterns = c(
+      "solin",                   # Solin, Solina, Solinu, Solinom
+      "solinsk"                  # solinska, solinski
+    ),
+    context_triggers = c(
+      "gospa od otoka", "gospe od otoka", "gospu od otoka", "gospom od otoka",
+      "starohrvatsk", "salonitansk", "salon",
+      "arheolog", "iskopin", "ruševin",
+      "crkv", "bazilik", "kralj zvonim",
+      "hodočast", "marijansk", "svetiš",
+      "šuplj crkv", "gradin"
+    )
+  )
+)
+
+cat("Destinations configured:", length(destinations), "\n")
+cat("  Type breakdown:\n")
+type_summary <- table(sapply(destinations, function(d) d$type))
+print(type_summary)
+
+cat("\n  Context gate required:\n")
+gate_summary <- data.table(
+  destination = names(destinations),
+  type = sapply(destinations, function(d) d$type),
+  context_gate = sapply(destinations, function(d) d$context_required),
+  n_patterns = sapply(destinations, function(d) length(d$patterns)),
+  n_triggers = sapply(destinations, function(d) length(d$context_triggers))
+)
+kable(gate_summary, caption = "Destination dictionary structure")
+```
+
+# 2. Register Dictionaries
+
+Register dictionaries are applied after retrieval, tagging each article
+on FULL_TEXT. Reduced Catholic root set derived from DigiKat project.
+
+```{r}
+#| label: register-dictionaries
+
+registers <- list(
+
+  religious = c(
+    "svetiš", "hodočast", "hodočasn",
+    "biskup", "nadbiskup", "kardinal", "svećenik", "fratar", "franjev",
+    "papa ", "papinsk", "vatikan",
+    "misa ", "misu ", "mise ", "misom",
+    "liturgij", "euharistij", "pričes",
+    "gospa", "majka božj", "isus", "krist",
+    "molitv", "blagoslov", "sakram",
+    "katolič", "kršćan", "vjernic", "vjera ",
+    "crkv", "katedral", "kapel", "bazilik",
+    "blagdan", "korizm", "advent", "uskrs",
+    "procesij", "zavjet", "čudo", "čuda", "čudotvor",
+    "marijansk", "duhovn"
+  ),
+
+  tourism = c(
+    "turizam", "turist", "turistič",
+    "destinacij", "posjetitelj", "posjet",
+    "dolasci", "dolazak",
+    "noćenj", "smještaj",
+    "hotel", "apartm",
+    "ljeto", "ljetn", "sezon",
+    "hrvatska turistič", "turistička zajednic",
+    "putnic", "putovanj",
+    "izletnic", "izlet"
+  ),
+
+  scandal = c(
+    "nesreć", "poginuo", "poginul", "stradal",
+    "skandal", "afer",
+    "istraga", "optužn", "sud",
+    "korupcij", "pronevjer", "zloporab",
+    "sukob", "kriminal",
+    "pljačk", "krađ",
+    "prevar", "šok"
+  )
+)
+
+cat("Register dictionaries:\n")
+for (nm in names(registers)) {
+  cat("  ", nm, ":", length(registers[[nm]]), "root patterns\n")
+}
+```
+
+# 3. Connect to Database
+
+```{r}
+#| label: connect
+
+con <- dbConnect(duckdb::duckdb(), dbdir = config$duckdb_path, read_only = TRUE)
+dbExecute(con, paste0("SET memory_limit='", config$db_memory_limit, "';"))
+main_tbl <- "media_data"
+cat("Connected. Table:", main_tbl, "\n")
+
+# verify columns we need exist
+cols <- dbGetQuery(con, paste0("SELECT * FROM \"", main_tbl, "\" LIMIT 0"))
+needed <- c("DATE", "TITLE", "FROM", "SOURCE_TYPE", "REACH",
+            "AUTO_SENTIMENT", "INTERACTIONS", "MENTION_SNIPPET",
+            "FULL_TEXT", "URL", "LANGUAGES")
+missing <- setdiff(needed, colnames(cols))
+if (length(missing) > 0) {
+  stop("Missing columns in database: ", paste(missing, collapse = ", "))
+}
+cat("All required columns present.\n")
+```
+
+# 4. Query Builders
+
+```{r}
+#| label: query-builders
+
+# build OR block of ILIKE clauses over TITLE and MENTION_SNIPPET
+build_ilike_block <- function(patterns) {
+  title_clauses <- paste0("\"TITLE\" ILIKE '%", patterns, "%'")
+  snippet_clauses <- paste0("\"MENTION_SNIPPET\" ILIKE '%", patterns, "%'")
+  paste(c(title_clauses, snippet_clauses), collapse = "\n    OR ")
+}
+
+# build full WHERE clause for one destination, applying context gate if needed
+build_destination_where <- function(dest_entry) {
+  dest_block <- build_ilike_block(dest_entry$patterns)
+
+  if (dest_entry$context_required) {
+    ctx_block <- build_ilike_block(dest_entry$context_triggers)
+    where_core <- paste0(
+      "(\n    ", dest_block, "\n  )\n  AND (\n    ", ctx_block, "\n  )"
+    )
+  } else {
+    where_core <- paste0("(\n    ", dest_block, "\n  )")
+  }
+
+  date_clause <- paste0(
+    "CAST(\"DATE\" AS DATE) >= '", config$analysis_start, "'\n  AND ",
+    "CAST(\"DATE\" AS DATE) <= '", config$analysis_end, "'"
+  )
+
+  # language filter (hr or bs)
+  lang_clauses <- paste0("\"LANGUAGES\" ILIKE '%", config$language_filter, "%'")
+  lang_block <- paste(lang_clauses, collapse = " OR ")
+
+  paste0(where_core, "\nAND (", date_clause, ")\nAND (", lang_block, ")")
+}
+
+# preview example query
+example_where <- build_destination_where(destinations$sinj)
+cat("Example WHERE clause for Sinj (context gate active):\n")
+cat(substr(example_where, 1, 800), "...\n")
+```
+
+# 5. Per-Destination Retrieval
+
+Loop through destinations, execute one query per destination, collect
+results. Each result is tagged with its destination label.
+
+```{r}
+#| label: retrieve-loop
+
+select_cols <- "\"DATE\", \"TITLE\", \"FROM\", \"SOURCE_TYPE\",
+\"REACH\", \"AUTO_SENTIMENT\", \"INTERACTIONS\",
+\"LIKE_COUNT\", \"COMMENT_COUNT\", \"SHARE_COUNT\",
+\"MENTION_SNIPPET\", \"FULL_TEXT\", \"URL\", \"LANGUAGES\""
+
+dest_results <- list()
+query_log <- data.table()
+
+for (dname in names(destinations)) {
+  dentry <- destinations[[dname]]
+  where_sql <- build_destination_where(dentry)
+
+  q <- paste0("SELECT ", select_cols, "\nFROM \"", main_tbl,
+              "\"\nWHERE ", where_sql)
+
+  t0 <- Sys.time()
+  res <- as.data.table(dbGetQuery(con, q))
+  t1 <- Sys.time()
+
+  res[, destination := dname]
+  res[, dest_type := dentry$type]
+  res[, context_gate_applied := dentry$context_required]
+
+  dest_results[[dname]] <- res
+
+  log_row <- data.table(
+    destination = dname,
+    type = dentry$type,
+    context_gate = dentry$context_required,
+    n_patterns = length(dentry$patterns),
+    n_triggers = length(dentry$context_triggers),
+    articles_matched = nrow(res),
+    query_seconds = round(as.numeric(difftime(t1, t0, units = "secs")), 1)
+  )
+  query_log <- rbind(query_log, log_row)
+
+  cat(sprintf("  %-18s | %6s articles | %5.1fs | gate=%s\n",
+              dname, format(nrow(res), big.mark = ","),
+              log_row$query_seconds,
+              ifelse(dentry$context_required, "Y", "N")))
+}
+
+cat("\nRetrieval complete. Summary:\n")
+kable(query_log, format.args = list(big.mark = ","),
+      caption = "Per-destination retrieval summary")
+```
+
+# 6. Assemble Long Format
+
+```{r}
+#| label: assemble-long
+
+long <- rbindlist(dest_results, use.names = TRUE, fill = TRUE)
+long[, date := as.Date(DATE)]
+long[, yearmonth := as.Date(format(date, "%Y-%m-01"))]
+long[, year := year(date)]
+long[, week := as.Date(cut(date, "week"))]
+long[, dow := weekdays(date)]
+long[, pair_id := .I]
+
+# a unique article hash for deduplication across destinations
+# uses URL if available, otherwise FROM+DATE+TITLE hash
+long[, article_key := ifelse(is.na(URL) | URL == "",
+                              paste(FROM, DATE, substr(TITLE, 1, 50), sep = "|"),
+                              URL)]
+long[, article_id := .GRP, by = article_key]
+
+cat("Long-format table assembled.\n")
+cat("  Rows (article-destination pairs):", format(nrow(long), big.mark = ","), "\n")
+cat("  Unique articles:", format(uniqueN(long$article_id), big.mark = ","), "\n")
+cat("  Articles mentioning multiple destinations:",
+    format(sum(long[, .N, by = article_id][, N > 1]), big.mark = ","), "\n")
+
+# multi-destination article breakdown
+n_dest_per_article <- long[, .(n_dest = uniqueN(destination)), by = article_id]
+multi_dest_tab <- n_dest_per_article[, .N, by = n_dest][order(n_dest)]
+kable(multi_dest_tab,
+      col.names = c("Destinations per article", "Articles"),
+      format.args = list(big.mark = ","),
+      caption = "Co-mention distribution")
+```
+
+# 7. Register Tagging on FULL_TEXT
+
+```{r}
+#| label: register-tagging
+
+# build one big regex per register for efficient matching
+build_register_pattern <- function(terms) {
+  # escape any regex metacharacters in terms (safety)
+  escaped <- stri_replace_all_regex(terms, "([.\\\\+*?\\[\\]{}^$()|])", "\\\\$1")
+  paste0("(?i)(", paste(escaped, collapse = "|"), ")")
+}
+
+pat_religious <- build_register_pattern(registers$religious)
+pat_tourism   <- build_register_pattern(registers$tourism)
+pat_scandal   <- build_register_pattern(registers$scandal)
+
+cat("Tagging registers on FULL_TEXT (this may take a minute)...\n")
+
+t0 <- Sys.time()
+long[, has_religious_register := stri_detect_regex(FULL_TEXT, pat_religious) |
+                                   stri_detect_regex(TITLE, pat_religious)]
+long[, has_tourism_register   := stri_detect_regex(FULL_TEXT, pat_tourism) |
+                                   stri_detect_regex(TITLE, pat_tourism)]
+long[, has_scandal_register   := stri_detect_regex(FULL_TEXT, pat_scandal) |
+                                   stri_detect_regex(TITLE, pat_scandal)]
+t1 <- Sys.time()
+
+cat("Register tagging done in",
+    round(as.numeric(difftime(t1, t0, units = "secs")), 1), "seconds.\n\n")
+
+# handle NAs (FULL_TEXT missing)
+for (col in c("has_religious_register", "has_tourism_register",
+              "has_scandal_register")) {
+  long[is.na(get(col)), (col) := FALSE]
+}
+
+register_summary <- long[, .(
+  n_pairs = .N,
+  pct_religious = round(mean(has_religious_register) * 100, 1),
+  pct_tourism   = round(mean(has_tourism_register) * 100, 1),
+  pct_scandal   = round(mean(has_scandal_register) * 100, 1)
+), by = .(destination, dest_type)][order(-n_pairs)]
+
+kable(register_summary, format.args = list(big.mark = ","),
+      caption = "Register prevalence by destination")
+```
+
+# 8. Quality Profile
+
+```{r}
+#| label: quality-profile
+
+cat("=== Overall corpus quality ===\n\n")
+cat("Total article-destination pairs:", format(nrow(long), big.mark = ","), "\n")
+cat("Unique articles:", format(uniqueN(long$article_id), big.mark = ","), "\n")
+cat("Unique sources:", format(uniqueN(long$FROM), big.mark = ","), "\n")
+cat("Date range:", format(min(long$date)), "to", format(max(long$date)), "\n")
+cat("Months covered:", uniqueN(long$yearmonth),
+    "of", config$minimum_months, "expected\n\n")
+
+# platform distribution per destination
+platform_dest <- long[, .N, by = .(destination, SOURCE_TYPE)]
+platform_dest_wide <- dcast(platform_dest, destination ~ SOURCE_TYPE,
+                             value.var = "N", fill = 0L)
+kable(platform_dest_wide, format.args = list(big.mark = ","),
+      caption = "Article-destination pairs by platform")
+
+# monthly coverage
+monthly_cov <- long[, .(n_pairs = .N, n_articles = uniqueN(article_id)),
+                     by = yearmonth][order(yearmonth)]
+cat("Thinnest month:", format(monthly_cov[which.min(n_pairs)]$yearmonth),
+    "with", min(monthly_cov$n_pairs), "pairs\n")
+cat("Thickest month:", format(monthly_cov[which.max(n_pairs)]$yearmonth),
+    "with", max(monthly_cov$n_pairs), "pairs\n")
+cat("Mean pairs per month:", round(mean(monthly_cov$n_pairs)), "\n")
+
+# sentiment distribution
+cat("\nAuto sentiment distribution (on pairs):\n")
+sent_tab <- long[, .N, by = AUTO_SENTIMENT][order(-N)]
+sent_tab[, pct := round(N / sum(N) * 100, 1)]
+print(sent_tab)
+```
+
+```{r}
+#| label: monthly-volume-plot
+
+p_vol <- ggplot(monthly_cov, aes(yearmonth, n_pairs)) +
+  geom_col(fill = "#2E4057", alpha = 0.85) +
+  geom_hline(yintercept = 50, linetype = "dotted", colour = "orange") +
+  labs(title = "Monthly article-destination pairs",
+       subtitle = "Dotted line marks 50-pair threshold",
+       x = NULL, y = "Pairs") +
+  theme_minimal()
+ggsave("output/figures/01_monthly_volume_destinations.png",
+       p_vol, width = 10, height = 5)
+p_vol
+```
+
+```{r}
+#| label: per-dest-timeseries
+
+monthly_dest <- long[, .(n = .N),
+                      by = .(destination, dest_type, yearmonth)]
+
+p_ts <- ggplot(monthly_dest, aes(yearmonth, n, colour = dest_type)) +
+  geom_line(alpha = 0.8) +
+  facet_wrap(~ destination, scales = "free_y", ncol = 2) +
+  labs(title = "Monthly volume by destination",
+       x = NULL, y = "Pairs", colour = "Type") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+ggsave("output/figures/01_per_destination_timeseries.png",
+       p_ts, width = 12, height = 10)
+p_ts
+```
+
+# 9. Decision Gate
+
+```{r}
+#| label: decision-gate
+
+cat(strrep("=", 60), "\n")
+cat("DECISION GATE 1\n")
+cat(strrep("=", 60), "\n\n")
+
+checks <- list()
+
+# 1. all destinations returned non-empty
+dest_nonempty <- query_log$articles_matched > 0
+checks$all_destinations_present <- all(dest_nonempty)
+cat("1. All destinations returned articles:",
+    ifelse(checks$all_destinations_present, "PASS", "FAIL"), "\n")
+if (!checks$all_destinations_present) {
+  empty <- query_log[articles_matched == 0]$destination
+  cat("   Empty:", paste(empty, collapse = ", "), "\n")
+}
+
+# 2. every destination meets descriptive threshold
+above_desc <- query_log$articles_matched >= config$min_articles_desc
+checks$all_above_descriptive <- all(above_desc)
+cat("2. All destinations >= ", config$min_articles_desc, " articles: ",
+    ifelse(checks$all_above_descriptive, "PASS", "CAUTION"), "\n", sep = "")
+if (!checks$all_above_descriptive) {
+  thin <- query_log[articles_matched < config$min_articles_desc]$destination
+  cat("   Below threshold:", paste(thin, collapse = ", "), "\n")
+}
+
+# 3. count destinations meeting STM threshold
+n_above_stm <- sum(query_log$articles_matched >= config$min_articles_stm)
+checks$stm_ready <- n_above_stm >= 6
+cat("3. At least 6 destinations >= ", config$min_articles_stm,
+    " articles (STM-ready): ",
+    ifelse(checks$stm_ready, "PASS", "CAUTION"),
+    " (", n_above_stm, " of ", length(destinations), ")\n", sep = "")
+
+# 4. month coverage
+checks$months_full <- uniqueN(long$yearmonth) >= config$minimum_months
+cat("4. All ", config$minimum_months, " months covered: ",
+    ifelse(checks$months_full, "PASS", "FAIL"),
+    " (", uniqueN(long$yearmonth), ")\n", sep = "")
+
+# 5. religious register prevalence in plausible range
+overall_religious <- mean(long$has_religious_register)
+checks$religious_ok <- overall_religious > 0.20 & overall_religious < 0.95
+cat("5. Religious register between 20-95% overall: ",
+    ifelse(checks$religious_ok, "PASS", "NOTE"),
+    " (", round(overall_religious * 100, 1), "%)\n", sep = "")
+
+# 6. platform diversity (at least 3 platforms per major destination)
+major_dests <- query_log[articles_matched >= config$min_articles_stm]$destination
+plat_per_major <- long[destination %in% major_dests,
+                         .(n_plat = uniqueN(SOURCE_TYPE)), by = destination]
+checks$platform_div <- all(plat_per_major$n_plat >= 3)
+cat("6. Major destinations cover 3+ platforms: ",
+    ifelse(checks$platform_div, "PASS", "NOTE"), "\n", sep = "")
+
+# 7. language filter working (hr dominant)
+lang_sample <- stri_count_regex(long$LANGUAGES, "hr") > 0
+checks$language_ok <- mean(lang_sample, na.rm = TRUE) > 0.90
+cat("7. Croatian language > 90% of matches: ",
+    ifelse(checks$language_ok, "PASS", "NOTE"),
+    " (", round(mean(lang_sample, na.rm = TRUE) * 100, 1), "%)\n", sep = "")
+
+cat("\n")
+n_pass <- sum(unlist(checks))
+cat("Passed:", n_pass, "of", length(checks), "\n")
+if (all(unlist(checks))) {
+  cat("ALL CHECKS PASSED. Proceed to Phase 2.\n")
+} else {
+  failed <- names(checks)[!unlist(checks)]
+  cat("Attention needed:", paste(failed, collapse = ", "), "\n")
+}
+cat(strrep("=", 60), "\n")
+```
+
+# 10. Disconnect
+
+```{r}
+#| label: disconnect
+
+dbDisconnect(con, shutdown = TRUE)
+cat("Database connection closed.\n")
+```
+
+# 11. Save Outputs
+
+```{r}
+#| label: save-outputs
+
+# main long-format corpus
+saveRDS(long, "data-raw/destinations_long.rds")
+
+# per-destination list for inspection
+saveRDS(dest_results, "data-raw/destinations_by_destination.rds")
+
+# query log
+saveRDS(query_log, "data/destinations_query_log.rds")
+fwrite(query_log, "output/tables/destinations_query_log.csv")
+
+# register summary
+saveRDS(register_summary, "data/destinations_register_summary.rds")
+fwrite(register_summary, "output/tables/destinations_register_summary.csv")
+
+# file sizes
+cat("Output files written:\n")
+fs <- c(
+  "data-raw/destinations_long.rds",
+  "data-raw/destinations_by_destination.rds",
+  "data/destinations_query_log.rds",
+  "data/destinations_register_summary.rds"
+)
+for (f in fs) {
+  if (file.exists(f)) {
+    cat("  ", f, "|", round(file.size(f) / 1e6, 1), "MB\n")
+  }
+}
+```
+
+# 12. Metadata Snapshot
+
+```{r}
+#| label: metadata
+
+retrieval_meta <- list(
+  timestamp       = Sys.time(),
+  phase           = "1_destination_retrieval",
+  r_version       = R.version.string,
+  duckdb_version  = packageVersion("duckdb"),
+  config          = config,
+  destinations    = destinations,
+  registers       = registers,
+  query_log       = query_log,
+  register_summary = register_summary,
+  gate_results    = checks,
+  n_pairs         = nrow(long),
+  n_articles      = uniqueN(long$article_id),
+  months_covered  = uniqueN(long$yearmonth)
+)
+
+saveRDS(retrieval_meta, "data/destinations_metadata.rds")
+cat("Metadata saved.\n\n")
+cat("Phase 1 complete. Primary working corpus: destinations_long.rds\n")
+cat("Next step: Phase 2 descriptive analysis.\n")
+```

@@ -1,0 +1,378 @@
+---
+title: "Phase 2d: Keyness Analysis"
+subtitle: "Textual profiles of destinations via log-likelihood keyness"
+author: "DigiKat Destination Framing Sub-study"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    code-fold: false
+    theme: cosmo
+    self-contained: true
+execute:
+  warning: false
+  message: false
+  eval: true
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(data.table)
+library(stringi)
+library(quanteda)
+library(quanteda.textstats)
+library(ggplot2)
+library(knitr)
+
+for (d in c("data", "output/tables", "output/figures")) {
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+}
+```
+
+# Design Notes
+
+Phase 2d produces textual profiles of destinations. For each destination,
+the log likelihood keyness test identifies tokens that are statistically
+over represented in articles about that destination compared to the rest
+of the corpus. Output is a ranked list of characteristic vocabulary per
+destination, forming the inductive counterpart to the deductive framing
+categories from Phase 2c.
+
+Keyness fills a specific role in the analytical pipeline. Framing
+analysis operates on predefined dictionary categories that capture
+thematic structure at the level of registers. Keyness operates on the
+full text corpus without prior assumptions, revealing destination
+specific vocabulary that may or may not align with dictionary
+categories. The two approaches triangulate, keyness empirically
+validates the registers where alignment holds and identifies residual
+lexical variation where it does not.
+
+The keyness statistic used is the log likelihood ratio G² (Dunning 1993),
+which is more robust than chi squared for low frequency tokens. Values
+above 10 are conventionally interpreted as statistically meaningful, and
+values above 100 as strongly distinctive.
+
+# 0. Configuration
+
+```{r}
+#| label: config
+
+config_2d <- list(
+  timestamp           = Sys.time(),
+  input_corpus        = "data/destinations_analytical_cleaned.rds",
+  fallback_corpus     = "data/destinations_analytical_cleaned.rds",
+  output_metadata     = "data/phase2d_metadata.rds",
+  top_n_keywords      = 25,
+  min_token_length    = 3,
+  min_doc_frequency   = 10,
+  min_target_docs     = 50,
+  seed                = 2026L
+)
+set.seed(config_2d$seed)
+saveRDS(config_2d, "data/config_phase2d.rds")
+cat("Phase 2d configuration saved.\n")
+```
+
+# 1. Load Corpus
+
+```{r}
+#| label: load
+
+input_path <- config_2d$input_corpus
+if (!file.exists(input_path)) input_path <- config_2d$fallback_corpus
+
+long <- readRDS(input_path)
+setDT(long)
+long <- long[cleaning_action == "keep"]
+
+cat("Corpus loaded from:", input_path, "\n")
+cat("  Total pairs:", format(nrow(long), big.mark = ","), "\n")
+cat("  Unique articles:",
+    format(uniqueN(long$article_id), big.mark = ","), "\n\n")
+```
+
+# 2. Article Level Text Base
+
+Keyness must operate on unique articles, not on pairs. An article that
+mentions two destinations would otherwise inflate both destinations'
+token counts artificially. The construction below takes each article's
+text once and maintains a separate article-to-destination mapping.
+
+```{r}
+#| label: article-base
+
+# keep only articles with usable text
+long_valid <- long[!is.na(FULL_TEXT) & nchar(FULL_TEXT) > 100]
+
+articles <- unique(long_valid[, .(article_id, FULL_TEXT)],
+                    by = "article_id")
+
+# destination membership per article (one article can belong to multiple)
+art_dest <- unique(long_valid[, .(article_id, destination)])
+
+cat("Article base constructed.\n")
+cat("  Unique articles with text:",
+    format(nrow(articles), big.mark = ","), "\n")
+cat("  Article-destination mappings:",
+    format(nrow(art_dest), big.mark = ","), "\n\n")
+
+dest_article_counts <- art_dest[, .N, by = destination][order(-N)]
+kable(dest_article_counts, format.args = list(big.mark = ","),
+      caption = "Unique articles per destination")
+```
+
+# 3. Tokenisation and DFM
+
+```{r}
+#| label: tokenisation
+
+croatian_stops <- c(
+  "biti", "jesam", "jesi", "jest", "jesmo", "jeste", "jesu",
+  "sam", "si", "je", "smo", "ste", "su",
+  "bio", "bila", "bilo", "bili", "bile",
+  "budem", "budeš", "bude", "budemo", "budete", "budu",
+  "bih", "bi", "bismo", "biste",
+  "nisam", "nisi", "nije", "nismo", "niste", "nisu",
+  "ga", "mu", "joj", "ih", "im", "mi", "ti", "me",
+  "te", "mene", "tebe", "on", "ona", "ono", "oni", "one",
+  "njega", "njemu", "njoj", "njima", "nama", "vama", "nas", "vas",
+  "koji", "koja", "koje", "kojim", "kojima", "kojem", "kojeg",
+  "kako", "kada", "gdje", "zašto", "dok", "dokle", "otkad",
+  "tako", "ovako", "onako", "sada", "tada", "onda", "još",
+  "samo", "neki", "neka", "neko", "nekad", "nešto", "netko",
+  "ako", "jer", "što", "čemu", "čega", "čime", "čim",
+  "preko", "iz", "od", "do", "za", "po",
+  "prije", "poslije", "tijekom", "pri", "bez", "nakon", "prema",
+  "među", "između", "iznad", "ispod", "pored", "uz",
+  "ovaj", "ova", "ovo", "ovi", "ove", "ovim", "ovu",
+  "taj", "ta", "to", "te", "tim", "tu", "ovoga", "toga",
+  "onaj", "ono", "onim",
+  "njegov", "njezin", "njihov", "njegova", "njezina",
+  "sve", "svi", "svih", "svoj", "svoja", "svoje", "svaki",
+  "god", "godine", "godina", "danas", "jučer", "sutra",
+  "više", "manje", "vrlo", "već", "može", "mora", "treba",
+  "kaže", "rekao", "rekla", "kazao", "kazala", "navodi", "naveo",
+  "imati", "ima", "nema", "imao", "imala", "imali",
+  "prva", "prvi", "prvo", "druga", "drugi", "drugo",
+  "puno", "malo", "posebno", "osobito",
+  "radi", "zbog", "ili", "ali", "ili", "jer",
+  "http", "https", "www", "com", "hr", "rtl", "html"
+)
+
+qc <- corpus(articles, text_field = "FULL_TEXT", docid_field = "article_id")
+
+toks <- tokens(qc,
+                what = "word",
+                remove_punct = TRUE,
+                remove_numbers = TRUE,
+                remove_symbols = TRUE,
+                remove_url = TRUE,
+                split_hyphens = TRUE) |>
+  tokens_tolower() |>
+  tokens_select(min_nchar = config_2d$min_token_length) |>
+  tokens_remove(croatian_stops)
+
+dfm_d <- dfm(toks) |>
+  dfm_trim(min_docfreq = config_2d$min_doc_frequency)
+
+cat("DFM constructed.\n")
+cat("  Documents:", format(ndoc(dfm_d), big.mark = ","), "\n")
+cat("  Vocabulary:", format(nfeat(dfm_d), big.mark = ","), "\n\n")
+```
+
+# 4. Per Destination Keyness
+
+```{r}
+#| label: keyness-loop
+
+destinations <- unique(long$destination)
+keyness_list <- list()
+
+for (d in destinations) {
+  target_articles <- art_dest[destination == d]$article_id
+  is_target <- docnames(dfm_d) %in% target_articles
+
+  n_target <- sum(is_target)
+  if (n_target < config_2d$min_target_docs) {
+    cat("Skipping", d, "only", n_target, "target articles.\n")
+    next
+  }
+
+  key_result <- textstat_keyness(dfm_d, target = is_target,
+                                   measure = "lr")
+
+  key_top <- head(key_result, config_2d$top_n_keywords)
+  key_top_dt <- as.data.table(key_top)
+  key_top_dt[, destination := d]
+  key_top_dt[, rank := .I]
+  keyness_list[[d]] <- key_top_dt
+
+  cat(sprintf("  %-18s | %5s target articles | top G2 = %s\n",
+              d, format(n_target, big.mark = ","),
+              round(max(key_top_dt$G2), 1)))
+}
+
+all_keyness <- rbindlist(keyness_list, fill = TRUE)
+fwrite(all_keyness, "output/tables/02d_keyness_all.csv")
+```
+
+# 5. Per Destination Tables
+
+```{r}
+#| label: display-tables
+#| results: asis
+
+for (d in destinations) {
+  if (!d %in% all_keyness$destination) next
+  cat("\n\n## ", d, "\n\n", sep = "")
+  show <- all_keyness[destination == d,
+                        .(rank, feature,
+                          G2 = round(G2, 1),
+                          p_value = format.pval(p, digits = 2),
+                          n_target, n_reference)]
+  print(kable(show, caption = paste("Top keywords for", d)))
+}
+```
+
+# 6. Cross Destination Overlap
+
+Most keywords should be specific to one destination. High overlap across
+destinations would suggest the distinctive vocabulary is thin.
+
+```{r}
+#| label: overlap
+
+shared_keywords <- all_keyness[, .N, by = feature][order(-N)]
+setnames(shared_keywords, c("feature", "n_destinations"))
+
+kable(shared_keywords[n_destinations >= 3],
+      caption = "Keywords appearing in three or more destinations")
+
+pct_unique <- round(sum(shared_keywords$n_destinations == 1) /
+                      nrow(shared_keywords) * 100, 1)
+cat("\nPercent of keywords appearing in only one destination: ",
+    pct_unique, "%\n", sep = "")
+
+fwrite(shared_keywords, "output/tables/02d_shared_keywords.csv")
+```
+
+# 7. Keyness Heatmap
+
+```{r}
+#| label: heatmap
+
+top_words_union <- unique(all_keyness[rank <= 10]$feature)
+heatmap_data <- all_keyness[feature %in% top_words_union]
+
+# order features by destination they belong to
+feature_order <- heatmap_data[, .(first_dest = destination[which.min(rank)],
+                                    min_rank = min(rank)),
+                               by = feature][order(first_dest, min_rank)]
+heatmap_data[, feature := factor(feature,
+                                   levels = feature_order$feature)]
+
+p_heat <- ggplot(heatmap_data,
+                  aes(destination, feature, fill = G2)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "#B2182B") +
+  labs(title = "Keyness heatmap",
+       subtitle = "Top 10 keywords per destination, G2 log-likelihood",
+       x = NULL, y = NULL, fill = "G2") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        axis.text.y = element_text(size = 7),
+        panel.grid = element_blank())
+
+ggsave("output/figures/02d_keyness_heatmap.png", p_heat,
+       width = 11, height = 18)
+p_heat
+```
+
+# 8. Decision Gate
+
+```{r}
+#| label: decision-gate
+
+cat(strrep("=", 60), "\n")
+cat("DECISION GATE 2d\n")
+cat(strrep("=", 60), "\n\n")
+
+checks <- list()
+
+# 1. all destinations profiled
+checks$all_destinations_profiled <- length(keyness_list) == length(destinations)
+cat("1. All destinations profiled: ",
+    ifelse(checks$all_destinations_profiled, "PASS", "NOTE"),
+    " (", length(keyness_list), " of ", length(destinations), ")\n", sep = "")
+
+# 2. meaningful G2 values in top 5 for each destination
+meaningful <- all_keyness[rank <= 5][, all(G2 > 10), by = destination]
+checks$meaningful_g2 <- all(meaningful$V1)
+cat("2. All destinations have top 5 keywords with G2 > 10: ",
+    ifelse(checks$meaningful_g2, "PASS", "REVIEW"), "\n", sep = "")
+
+# 3. sufficient unique vocabulary
+checks$unique_keywords <- pct_unique >= 60
+cat("3. At least 60% of keywords are destination specific: ",
+    ifelse(checks$unique_keywords, "PASS", "NOTE"),
+    " (", pct_unique, "%)\n", sep = "")
+
+# 4. keyness distribution spans reasonable range
+g2_range <- diff(range(all_keyness$G2))
+checks$g2_range <- g2_range > 100
+cat("4. G2 range spans > 100 across corpus: ",
+    ifelse(checks$g2_range, "PASS", "NOTE"),
+    " (range = ", round(g2_range, 1), ")\n", sep = "")
+
+cat("\n")
+cat("Passed:", sum(unlist(checks)), "of", length(checks), "\n")
+cat(strrep("=", 60), "\n")
+```
+
+# 9. Save Outputs
+
+```{r}
+#| label: save
+
+meta_2d <- list(
+  timestamp          = Sys.time(),
+  phase              = "2d_keyness",
+  config             = config_2d,
+  all_keyness        = all_keyness,
+  shared_keywords    = shared_keywords,
+  pct_unique         = pct_unique,
+  checks             = checks,
+  n_articles_used    = ndoc(dfm_d),
+  n_features         = nfeat(dfm_d)
+)
+saveRDS(meta_2d, config_2d$output_metadata)
+cat("Phase 2d saved to", config_2d$output_metadata, "\n")
+```
+
+# 10. Interpretive Summary
+
+The keyness output feeds directly into the Descriptive Analysis section
+of the results, specifically into the *Textual Profiles of Destinations*
+subsection. Three analytical moves are now possible.
+
+First, each destination has an empirical vocabulary signature that can
+be described narratively. Expected patterns include Ludbreg anchored in
+eucharistic vocabulary, Vepric in Lourdes and Makarska imagery, Sinj in
+Alka and equestrian vocabulary, Marija Bistrica in national pilgrimage
+language, Nin in medieval Croatian statehood vocabulary.
+
+Second, the keyness output validates or challenges the framing
+categories. Where religious keywords dominate, the dictionary tag
+religious_only is empirically grounded. Where tourism or political
+keywords dominate, the dictionary tag tourism_only is equally grounded.
+Destinations whose top keywords mix both categories validate the
+religious_tourism_mixed frame.
+
+Third, cross destination overlap reveals the intertextual structure of
+the corpus. Keywords shared across three or more destinations point to
+generic religious or tourism vocabulary. Keywords specific to one
+destination point to the distinctive identity each shrine occupies in
+the media ecosystem.

@@ -1,0 +1,640 @@
+---
+title: "Phase 1c: Corpus Refinement for Destination Framing Analysis"
+subtitle: "Word boundary disambiguation plus uniform register gate"
+author: "DigiKat Destination Framing Sub-study"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    code-fold: false
+    theme: cosmo
+    self-contained: true
+execute:
+  warning: false
+  message: false
+  eval: true
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(data.table)
+library(stringi)
+library(ggplot2)
+library(knitr)
+library(patchwork)
+
+for (d in c("data", "data-raw", "output/tables", "output/figures",
+            "output/reports")) {
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+}
+```
+
+# Design Notes
+
+Phase 1b diagnostics revealed two distinct problems with the raw retrieval
+corpus.
+
+1. Polysemic destinations (Sinj, Nin, Solin) suffered substring contamination
+   because ILIKE patterns without word boundaries matched inside unrelated
+   words (nekretnina, trening, Nina as a given name, sinji as adjective,
+   Solinjanin as surname).
+2. Even after disambiguation, many destination mentions do not pertain to
+   the religious tourism discourse at all (traffic reports, property ads,
+   local sports coverage), which inflates the corpus with content outside
+   the definitional scope of the study.
+
+Phase 1c applies two sequential refinements to the Phase 1 working corpus
+without rerunning database retrieval.
+
+Refinement 1, Unicode aware word boundary filter for polysemic destinations.
+Applies only to Sinj, Nin, Solin. Uses stringi regex with proper Unicode
+letter class so Croatian diacritics are respected.
+
+Refinement 2, uniform register gate. Article-destination pair is kept only
+if at least one of (religious, tourism) registers is present in the full
+text or title. Scandal register alone does not qualify as in scope because
+scandal content without religious or tourism anchor is outside study scope.
+
+The refinement is applied to all destinations uniformly to preserve one
+consistent scope across the analytical corpus. Clean destinations
+(Marija Bistrica, Trsat, Aljmaš, Voćin, Vepric, Ludbreg, Krasno) lose
+a portion of their volume, but that portion is precisely the part of their
+coverage that sits outside the religious tourism frame.
+
+The Phase 1 corpus (destinations_long.rds) is preserved as the provenance
+record. The Phase 1c output (destinations_analytical.rds) is the working
+corpus for Phases 2 onward.
+
+# 0. Configuration
+
+```{r}
+#| label: config
+
+config_c <- list(
+  timestamp              = Sys.time(),
+  input_corpus           = "data-raw/destinations_long.rds",
+  output_corpus          = "data-raw/destinations_analytical.rds",
+  output_metadata        = "data/destinations_analytical_metadata.rds",
+  polysemic_destinations = c("sinj", "nin", "solin"),
+  clean_destinations     = c("marija_bistrica", "trsat", "aljmas",
+                             "vocin", "vepric", "ludbreg", "krasno"),
+  register_gate_mode     = "uniform",
+  register_gate_requires = c("has_religious_register", "has_tourism_register"),
+  min_articles_stm       = 300L,
+  min_articles_desc      = 50L,
+  minimum_months         = 41L,
+  max_clean_loss_pct     = 70,
+  min_polysemic_kept     = 1000L
+)
+
+saveRDS(config_c, "data/config_phase1c.rds")
+cat("Phase 1c configuration saved.\n")
+cat("  Polysemic destinations:",
+    paste(config_c$polysemic_destinations, collapse = ", "), "\n")
+cat("  Register gate mode:", config_c$register_gate_mode, "\n")
+```
+
+# 1. Load Phase 1 Corpus
+
+```{r}
+#| label: load
+
+long <- readRDS(config_c$input_corpus)
+setDT(long)
+
+cat("Phase 1 corpus loaded.\n")
+cat("  Rows (pairs):", format(nrow(long), big.mark = ","), "\n")
+cat("  Unique articles:", format(uniqueN(long$article_id), big.mark = ","), "\n")
+cat("  Destinations:", length(unique(long$destination)), "\n\n")
+
+baseline_counts <- long[, .(baseline_pairs = .N), by = destination]
+kable(baseline_counts[order(-baseline_pairs)],
+      format.args = list(big.mark = ","),
+      caption = "Baseline pair counts per destination (Phase 1 input)")
+```
+
+# 2. Refinement 1: Word Boundary Disambiguation
+
+Apply Unicode aware regex with letter class boundaries for polysemic
+destinations. The pattern structure is as follows.
+
+- Leading guard is start of string or non letter character, expressed as
+  `(?:^|[^\\p{L}])`.
+- Stem is matched case insensitively.
+- Optional suffix is any sequence of letters, expressed as `[\\p{L}]*`.
+- Trailing guard is end of string or non letter character, expressed as
+  `(?:$|[^\\p{L}])`.
+
+This respects Croatian diacritics because `\p{L}` is the Unicode letter
+class, not ASCII `[a-z]`.
+
+```{r}
+#| label: boundary-filter
+
+# stem definitions per polysemic destination
+# note: Sinj stems deliberately exclude "alka"/"alkar" because those
+# introduce event-level content that is separately tracked and would
+# otherwise cause pattern-trigger overlap (see Phase 1 review)
+boundary_stems <- list(
+  sinj  = c("Sinj", "sinjsk"),
+  nin   = c("Nin", "ninsk"),
+  solin = c("Solin", "solinsk")
+)
+
+make_boundary_rx <- function(stems) {
+  # escape any regex metachars in stems (defensive, stems should be plain)
+  esc <- stri_replace_all_regex(stems, "([.\\\\+*?\\[\\]{}^$()|])", "\\\\$1")
+  paste0("(?i)(?:^|[^\\p{L}])(?:",
+         paste(esc, collapse = "|"),
+         ")[\\p{L}]*(?:$|[^\\p{L}])")
+}
+
+# initialise column; non-polysemic rows stay TRUE by default
+long[, pass_boundary := TRUE]
+
+# apply boundary regex only to polysemic destinations
+# note on residual person-name contamination (Nina, Nino etc.)
+# the stem "Nin" with letter-class suffix cannot be distinguished from
+# Croatian given names through regex alone. the register gate in step 4
+# filters the remainder. empirically ~9 percent of Nin rows are
+# person-name matches (per Phase 1b contamination check), most of which
+# lack religious or tourism register and drop out at the gate.
+
+for (d in config_c$polysemic_destinations) {
+  rx <- make_boundary_rx(boundary_stems[[d]])
+
+  long[destination == d,
+       pass_boundary := {
+         blob <- paste(TITLE, MENTION_SNIPPET, sep = " | ")
+         hit  <- stri_detect_regex(blob, rx)
+         hit[is.na(hit)] <- FALSE
+         hit
+       }]
+
+  n_before <- long[destination == d, .N]
+  n_after  <- long[destination == d & pass_boundary == TRUE, .N]
+  cat(sprintf("  %-8s | before %7s | after %7s | dropped %5.1f%%\n",
+              d,
+              format(n_before, big.mark = ","),
+              format(n_after, big.mark = ","),
+              100 * (1 - n_after / n_before)))
+}
+
+cat("\nWord boundary filter applied.\n")
+cat("  Clean destinations untouched (pass_boundary = TRUE for all).\n")
+```
+
+# 3. Intermediate Corpus After Refinement 1
+
+```{r}
+#| label: intermediate-A
+
+long_A <- long[pass_boundary == TRUE]
+
+cat("Corpus after word boundary filter:\n")
+cat("  Rows:", format(nrow(long_A), big.mark = ","), "\n")
+cat("  Unique articles:", format(uniqueN(long_A$article_id), big.mark = ","), "\n\n")
+
+interim_counts <- long_A[, .(after_A = .N), by = destination]
+counts_A <- merge(baseline_counts, interim_counts,
+                   by = "destination", all.x = TRUE)
+counts_A[is.na(after_A), after_A := 0]
+counts_A[, pct_kept_A := round(after_A / baseline_pairs * 100, 1)]
+counts_A <- counts_A[order(-baseline_pairs)]
+
+kable(counts_A, format.args = list(big.mark = ","),
+      caption = "After word boundary filter")
+```
+
+# 4. Refinement 2: Uniform Register Gate
+
+Keep pair if religious or tourism register is present. Applies to all
+destinations, not only polysemic ones. This enforces a single scope
+across the analytical corpus.
+
+```{r}
+#| label: register-gate
+
+long_A[, pass_register := has_religious_register | has_tourism_register]
+long_A[is.na(pass_register), pass_register := FALSE]
+
+# diagnostic before we filter
+register_gate_summary <- long_A[, .(
+  n = .N,
+  pass_register = sum(pass_register),
+  pct_kept = round(sum(pass_register) / .N * 100, 1)
+), by = destination][order(-n)]
+
+kable(register_gate_summary, format.args = list(big.mark = ","),
+      caption = "Register gate retention rate by destination")
+```
+
+# 5. Final Analytical Corpus
+
+```{r}
+#| label: final-corpus
+
+long_final <- long_A[pass_register == TRUE]
+
+cat("Final analytical corpus:\n")
+cat("  Rows:", format(nrow(long_final), big.mark = ","), "\n")
+cat("  Unique articles:", format(uniqueN(long_final$article_id),
+                                 big.mark = ","), "\n")
+cat("  Months covered:", uniqueN(long_final$yearmonth),
+    "of", config_c$minimum_months, "\n\n")
+
+final_counts <- long_final[, .(final_pairs = .N), by = destination]
+all_counts <- merge(counts_A, final_counts, by = "destination",
+                     all.x = TRUE)
+all_counts[is.na(final_pairs), final_pairs := 0]
+all_counts[, pct_kept_total := round(final_pairs / baseline_pairs * 100, 1)]
+all_counts[, pct_kept_given_A := round(final_pairs / after_A * 100, 1)]
+all_counts <- all_counts[order(-baseline_pairs)]
+
+kable(all_counts, format.args = list(big.mark = ","),
+      caption = "Pair counts across all refinement stages")
+```
+
+# 6. Sanity Checks on Clean Destinations
+
+The clean destinations (Marija Bistrica, Trsat, Aljmaš, Voćin, Vepric,
+Ludbreg, Krasno) should retain most of their volume through the register
+gate. If any of them loses more than the configured threshold, that
+indicates either a register dictionary gap or an unexpected content
+profile that warrants investigation.
+
+```{r}
+#| label: sanity-clean
+
+clean_check <- all_counts[destination %in% config_c$clean_destinations,
+                           .(destination, baseline_pairs, final_pairs,
+                             pct_kept_total)]
+clean_check[, status := fifelse(
+  pct_kept_total >= (100 - config_c$max_clean_loss_pct),
+  "OK", "REVIEW")]
+
+kable(clean_check, format.args = list(big.mark = ","),
+      caption = "Clean destinations sanity check")
+
+any_review <- any(clean_check$status == "REVIEW")
+if (any_review) {
+  cat("\nNOTE: at least one clean destination lost more than",
+      config_c$max_clean_loss_pct, "percent.\n")
+  cat("Inspect sample of dropped articles before proceeding.\n")
+} else {
+  cat("\nAll clean destinations retained at least",
+      100 - config_c$max_clean_loss_pct, "percent. Proceed.\n")
+}
+```
+
+# 7. Sanity Checks on Polysemic Destinations
+
+After both refinements, polysemic destinations should sit closer to the
+clean destination baseline in terms of register prevalence. They should
+also retain enough absolute volume for downstream STM estimation.
+
+```{r}
+#| label: sanity-polysemic
+
+poly_check <- long_final[destination %in% config_c$polysemic_destinations,
+  .(
+    final_pairs = .N,
+    pct_religious = round(mean(has_religious_register) * 100, 1),
+    pct_tourism = round(mean(has_tourism_register) * 100, 1),
+    pct_any_target = round(mean(has_religious_register |
+                                 has_tourism_register) * 100, 1)
+  ), by = destination]
+
+clean_reference <- long_final[destination %in% config_c$clean_destinations,
+  .(
+    final_pairs = .N,
+    pct_religious = round(mean(has_religious_register) * 100, 1),
+    pct_tourism = round(mean(has_tourism_register) * 100, 1),
+    pct_any_target = round(mean(has_religious_register |
+                                 has_tourism_register) * 100, 1)
+  ), by = destination]
+
+poly_check[, status := fifelse(
+  final_pairs >= config_c$min_polysemic_kept, "OK", "REVIEW")]
+
+kable(rbind(
+  cbind(group = "polysemic", poly_check),
+  cbind(group = "clean", clean_reference[, .(
+    destination, final_pairs, pct_religious, pct_tourism, pct_any_target,
+    status = "reference")])
+), format.args = list(big.mark = ","),
+   caption = "Polysemic vs clean destinations after full refinement")
+```
+
+# 8. Frame Variable Construction
+
+With the analytical corpus defined, construct the dominant frame variable
+that operationalises the second research question (context of media
+mentions). The dominant frame is assigned according to a hierarchy that
+respects the research definition.
+
+Priority order:
+1. Scandal frame if scandal register present without religious anchor.
+2. Religious tourism mixed frame if both religious and tourism registers
+   present.
+3. Religious frame if religious register only.
+4. Tourism frame if tourism register only.
+5. Other, residual category.
+
+```{r}
+#| label: frame-construction
+
+long_final[, dominant_frame := fcase(
+  has_scandal_register & !has_religious_register & !has_tourism_register,
+    "scandal",
+  has_religious_register & has_tourism_register,
+    "religious_tourism_mixed",
+  has_religious_register & !has_tourism_register & has_scandal_register,
+    "religious_with_scandal",
+  has_religious_register & !has_tourism_register,
+    "religious_only",
+  has_tourism_register & !has_religious_register & has_scandal_register,
+    "tourism_with_scandal",
+  has_tourism_register & !has_religious_register,
+    "tourism_only",
+  default = "other"
+)]
+
+frame_dist <- long_final[, .N, by = .(destination, dominant_frame)]
+frame_dist_wide <- dcast(frame_dist, destination ~ dominant_frame,
+                          value.var = "N", fill = 0L)
+
+# total per destination
+frame_dist_wide[, total := rowSums(.SD),
+                .SDcols = setdiff(names(frame_dist_wide), "destination")]
+frame_dist_wide <- frame_dist_wide[order(-total)]
+
+kable(frame_dist_wide, format.args = list(big.mark = ","),
+      caption = "Dominant frame distribution per destination (counts)")
+
+# same as percentages
+frame_cols <- setdiff(names(frame_dist_wide), c("destination", "total"))
+frame_pct <- copy(frame_dist_wide)
+for (col in frame_cols) {
+  frame_pct[, (col) := round(get(col) / total * 100, 1)]
+}
+frame_pct[, total := NULL]
+
+kable(frame_pct,
+      caption = "Dominant frame distribution per destination (percentages)")
+```
+
+# 9. Visual Diagnostics
+
+```{r}
+#| label: visual-retention
+
+retention_long <- melt(all_counts[, .(destination, baseline_pairs,
+                                       after_A, final_pairs)],
+                       id.vars = "destination",
+                       variable.name = "stage",
+                       value.name = "pairs")
+retention_long[, stage := factor(stage,
+                                  levels = c("baseline_pairs",
+                                             "after_A",
+                                             "final_pairs"),
+                                  labels = c("Phase 1",
+                                             "After boundary filter",
+                                             "After register gate"))]
+
+p_retention <- ggplot(retention_long,
+                      aes(stage, pairs, group = destination,
+                          colour = destination)) +
+  geom_line(alpha = 0.7) +
+  geom_point(size = 2) +
+  scale_y_log10(labels = scales::comma) +
+  labs(title = "Pair count retention across refinement stages",
+       subtitle = "Log scale. Steep drops on sinj and nin are intentional.",
+       x = NULL, y = "Pairs (log scale)") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+ggsave("output/figures/01c_retention_by_stage.png", p_retention,
+       width = 10, height = 6)
+p_retention
+```
+
+```{r}
+#| label: visual-frames
+
+frame_plot_data <- long_final[, .N, by = .(destination, dominant_frame)]
+frame_plot_data[, total := sum(N), by = destination]
+frame_plot_data[, pct := N / total * 100]
+frame_plot_data[, destination := factor(destination,
+                                         levels = all_counts[order(-final_pairs),
+                                                              destination])]
+
+p_frames <- ggplot(frame_plot_data,
+                   aes(destination, pct, fill = dominant_frame)) +
+  geom_col() +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Dominant frame composition by destination",
+       x = NULL, y = "Percent of pairs", fill = "Frame") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        legend.position = "bottom")
+
+ggsave("output/figures/01c_frame_composition.png", p_frames,
+       width = 12, height = 6)
+p_frames
+```
+
+```{r}
+#| label: visual-monthly
+
+monthly_final <- long_final[, .N, by = .(destination, yearmonth)]
+p_monthly <- ggplot(monthly_final, aes(yearmonth, N, colour = destination)) +
+  geom_line(alpha = 0.7) +
+  facet_wrap(~ destination, scales = "free_y", ncol = 2) +
+  labs(title = "Monthly volume by destination (analytical corpus)",
+       x = NULL, y = "Pairs") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+ggsave("output/figures/01c_monthly_volume_analytical.png", p_monthly,
+       width = 12, height = 10)
+p_monthly
+```
+
+# 10. Decision Gate
+
+```{r}
+#| label: decision-gate
+
+cat(strrep("=", 60), "\n")
+cat("DECISION GATE 1c\n")
+cat(strrep("=", 60), "\n\n")
+
+checks <- list()
+
+# 1. all destinations retained at least descriptive minimum
+desc_check <- long_final[, .N, by = destination]
+desc_check[, pass := N >= config_c$min_articles_desc]
+checks$all_above_descriptive <- all(desc_check$pass)
+cat("1. All destinations above ", config_c$min_articles_desc, " pairs: ",
+    ifelse(checks$all_above_descriptive, "PASS", "CAUTION"), "\n", sep = "")
+if (!checks$all_above_descriptive) {
+  thin <- desc_check[pass == FALSE]$destination
+  cat("   Below threshold:", paste(thin, collapse = ", "), "\n")
+}
+
+# 2. at least N destinations above STM threshold
+n_above_stm <- sum(desc_check$N >= config_c$min_articles_stm)
+checks$stm_ready <- n_above_stm >= 6
+cat("2. At least 6 destinations above ", config_c$min_articles_stm,
+    " (STM-ready): ",
+    ifelse(checks$stm_ready, "PASS", "CAUTION"),
+    " (", n_above_stm, ")\n", sep = "")
+
+# 3. clean destinations retained sufficient volume
+clean_retention <- all_counts[destination %in% config_c$clean_destinations]
+checks$clean_retained <- all(clean_retention$pct_kept_total >=
+                              (100 - config_c$max_clean_loss_pct))
+cat("3. Clean destinations retained at least ",
+    100 - config_c$max_clean_loss_pct, "%: ",
+    ifelse(checks$clean_retained, "PASS", "REVIEW"), "\n", sep = "")
+
+# 4. polysemic destinations retained minimum absolute volume
+poly_volume <- long_final[destination %in% config_c$polysemic_destinations,
+                           .N, by = destination]
+checks$poly_volume <- all(poly_volume$N >= config_c$min_polysemic_kept)
+cat("4. Polysemic destinations above ",
+    format(config_c$min_polysemic_kept, big.mark = ","), " pairs: ",
+    ifelse(checks$poly_volume, "PASS", "CAUTION"), "\n", sep = "")
+if (!checks$poly_volume) {
+  thin <- poly_volume[N < config_c$min_polysemic_kept]
+  cat("   Below threshold: ",
+      paste0(thin$destination, " (", format(thin$N, big.mark = ","), ")",
+             collapse = ", "),
+      "\n")
+}
+
+# 5. register prevalence gap between polysemic and clean narrowed
+poly_any <- long_final[destination %in% config_c$polysemic_destinations,
+                        mean(has_religious_register |
+                             has_tourism_register)]
+clean_any <- long_final[destination %in% config_c$clean_destinations,
+                         mean(has_religious_register |
+                              has_tourism_register)]
+# both should be 100% by construction after register gate
+# sanity check, both should equal 1
+checks$gate_enforced <- isTRUE(all.equal(poly_any, 1)) &&
+                         isTRUE(all.equal(clean_any, 1))
+cat("5. Register gate correctly enforced (both groups at 100%): ",
+    ifelse(checks$gate_enforced, "PASS", "FAIL"),
+    " (poly=", round(poly_any * 100, 1),
+    "%, clean=", round(clean_any * 100, 1), "%)\n", sep = "")
+
+# 6. months covered
+checks$months_full <- uniqueN(long_final$yearmonth) >= config_c$minimum_months
+cat("6. All ", config_c$minimum_months, " months covered: ",
+    ifelse(checks$months_full, "PASS", "FAIL"),
+    " (", uniqueN(long_final$yearmonth), ")\n", sep = "")
+
+# 7. frame diversity per major destination
+major_dests <- desc_check[N >= config_c$min_articles_stm]$destination
+frame_div <- long_final[destination %in% major_dests,
+                         .(n_frames = uniqueN(dominant_frame)),
+                         by = destination]
+checks$frame_diversity <- all(frame_div$n_frames >= 3)
+cat("7. Major destinations span at least 3 frame categories: ",
+    ifelse(checks$frame_diversity, "PASS", "NOTE"), "\n", sep = "")
+
+cat("\n")
+n_pass <- sum(unlist(checks))
+cat("Passed:", n_pass, "of", length(checks), "\n")
+if (all(unlist(checks))) {
+  cat("ALL CHECKS PASSED. destinations_analytical.rds ready for Phase 2.\n")
+} else {
+  failed <- names(checks)[!unlist(checks)]
+  cat("Attention needed:", paste(failed, collapse = ", "), "\n")
+}
+cat(strrep("=", 60), "\n")
+```
+
+# 11. Save Outputs
+
+```{r}
+#| label: save
+
+# drop helper columns before saving the analytical corpus
+long_final[, pass_boundary := NULL]
+long_final[, pass_register := NULL]
+
+saveRDS(long_final, config_c$output_corpus)
+
+refinement_meta <- list(
+  timestamp        = Sys.time(),
+  phase            = "1c_corpus_refinement",
+  input_corpus     = config_c$input_corpus,
+  output_corpus    = config_c$output_corpus,
+  r_version        = R.version.string,
+  config           = config_c,
+  boundary_stems   = boundary_stems,
+  baseline_counts  = baseline_counts,
+  counts_after_A   = counts_A,
+  final_counts     = final_counts,
+  all_counts       = all_counts,
+  frame_dist_wide  = frame_dist_wide,
+  frame_pct        = frame_pct,
+  checks           = checks,
+  n_pairs_input    = nrow(long),
+  n_pairs_after_A  = nrow(long_A),
+  n_pairs_final    = nrow(long_final),
+  n_articles_final = uniqueN(long_final$article_id),
+  months_covered   = uniqueN(long_final$yearmonth)
+)
+
+saveRDS(refinement_meta, config_c$output_metadata)
+
+fwrite(all_counts, "output/tables/01c_retention_table.csv")
+fwrite(frame_dist_wide, "output/tables/01c_frame_distribution_counts.csv")
+fwrite(frame_pct, "output/tables/01c_frame_distribution_pct.csv")
+
+cat("Outputs saved.\n")
+cat("  Analytical corpus:", config_c$output_corpus, "\n")
+cat("  Metadata:        ", config_c$output_metadata, "\n\n")
+
+fs <- c(config_c$output_corpus, config_c$output_metadata,
+        "output/tables/01c_retention_table.csv",
+        "output/tables/01c_frame_distribution_counts.csv",
+        "output/tables/01c_frame_distribution_pct.csv",
+        "output/figures/01c_retention_by_stage.png",
+        "output/figures/01c_frame_composition.png",
+        "output/figures/01c_monthly_volume_analytical.png")
+for (f in fs) {
+  if (file.exists(f)) {
+    size_mb <- round(file.size(f) / 1e6, 2)
+    cat("  ", f, " | ", size_mb, " MB\n", sep = "")
+  }
+}
+```
+
+# 12. Next Steps
+
+The analytical corpus destinations_analytical.rds now carries one
+consistent definitional scope. Phase 2 can proceed along three tracks.
+
+First, descriptive profile. Frequency of each destination, platform
+distribution, source concentration (is coverage driven by few outlets),
+and syndication rate estimated via content hash clustering.
+
+Second, temporal dynamics. Monthly volume decomposed into trend, seasonal
+cycle, and residual. Overlay of liturgical calendar events (Velika Gospa,
+Mala Gospa, patronal feasts per destination) on the monthly series to test
+whether seasonality follows feast days or is uniformly distributed.
+
+Third, framing analysis. Dominant frame as categorical outcome, with
+destination and month as predictors. STM on the full text corpus with
+prevalence covariates destination, month, and source type.
+
+Phase 1c has closed the retrieval stage. Phase 2 is descriptive analysis
+on the settled analytical corpus.

@@ -1,0 +1,176 @@
+---
+title: "Phase 2h: Destination Type Framing Test"
+subtitle: "Permutation test and scatter: dest_type_cat explains tourism frame share"
+author: "DigiKat Destination Framing Sub-study"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    theme: cosmo
+    self-contained: true
+execute:
+  warning: false
+  message: false
+  eval: true
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(data.table)
+library(ggplot2)
+library(ggrepel)
+library(stringi)
+
+source("../../R/theme_reltur.R")
+source("../../R/join_dest_type.R")
+
+for (d in c("output/tables", "output/figures")) {
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+}
+```
+
+# 0. Configuration
+
+```{r}
+#| label: config
+
+config_2h <- list(
+  input_corpus = "data/destinations_analytical_final.rds",
+  seed = 2026L,
+  n_perm = 9999L
+)
+set.seed(config_2h$seed)
+```
+
+# 1. Load Corpus
+
+```{r}
+#| label: load
+
+long <- readRDS(config_2h$input_corpus)
+setDT(long)
+
+if (!"dest_type_cat" %in% names(long)) long <- join_dest_type(long)
+
+registers_dt <- data.table::fread("../../dictionaries/registers.csv")
+
+cat("Corpus rows:", format(nrow(long), big.mark = ","), "\n")
+```
+
+# 2. Per-Article Continuous Register Scores
+
+```{r}
+#| label: register-scores
+
+for (i in seq_len(nrow(registers_dt))) {
+  pat <- registers_dt$register[i]
+  kw  <- registers_dt$keyword_pattern[i]
+  col <- paste0("score_", pat)
+  long[, (col) := stringi::stri_count_regex(
+    stringi::stri_trans_tolower(MENTION_SNIPPET, locale = "hr"), kw
+  )]
+}
+
+long[, n_words := stringi::stri_count_words(MENTION_SNIPPET)]
+long[n_words == 0L, n_words := 1L]
+long[, score_religious_norm := score_religious / n_words]
+long[, score_tourism_norm   := score_tourism   / n_words]
+```
+
+# 3. Aggregate to Destination Level
+
+```{r}
+#| label: aggregate
+
+dest_scores <- long[, .(
+  religious_mean  = mean(score_religious_norm, na.rm = TRUE),
+  tourism_mean    = mean(score_tourism_norm, na.rm = TRUE),
+  tourism_share   = mean(dominant_frame %in%
+                         c("tourism_only", "religious_tourism_mixed")),
+  religious_share = mean(dominant_frame == "religious_only"),
+  n = .N
+), by = .(destination, dest_type_cat)]
+
+print(dest_scores[order(dest_type_cat, destination)])
+fwrite(dest_scores, "output/tables/02h_desttype_scores.csv")
+```
+
+# 4. Permutation Test
+
+```{r}
+#| label: permutation-test
+
+obs_F <- tryCatch(
+  summary(aov(tourism_share ~ dest_type_cat, data = dest_scores))[[1]][1, 4],
+  error = function(e) NA_real_
+)
+
+set.seed(config_2h$seed)
+perm_F <- replicate(config_2h$n_perm, {
+  shuffled <- data.table(
+    tourism_share = dest_scores$tourism_share,
+    dest_type_cat = sample(dest_scores$dest_type_cat)
+  )
+  tryCatch(
+    summary(aov(tourism_share ~ dest_type_cat, data = shuffled))[[1]][1, 4],
+    error = function(e) NA_real_
+  )
+})
+
+perm_p <- mean(perm_F >= obs_F, na.rm = TRUE)
+cat("Permutation test (N =", config_2h$n_perm, "):\n")
+cat("  Observed F =", round(obs_F, 3), "\n")
+cat("  Permutation p =", round(perm_p, 3), "\n")
+
+fwrite(
+  data.table(F_obs = obs_F, perm_p = perm_p, n_perm = config_2h$n_perm),
+  "output/tables/02h_permutation_test.csv"
+)
+```
+
+# 5. Scatter Plot
+
+```{r}
+#| label: scatter-plot
+
+p_types <- ggplot(dest_scores,
+  aes(x = religious_share * 100, y = tourism_share * 100,
+      label = destination, colour = dest_type_cat)) +
+  geom_point(size = 4) +
+  ggrepel::geom_text_repel(size = 3.2, show.legend = FALSE) +
+  labs(x = "Udio religijskog okvira (%)",
+       y = "Udio turističkog okvira (%)",
+       colour = "Tip destinacije",
+       title = "Pozicioniranje destinacija po dominantnom okviru") +
+  theme_reltur()
+
+ggsave("output/figures/02h_desttype_scatter.png", p_types,
+       width = 14, height = 10, dpi = 300)
+p_types
+```
+
+# 6. Decision Gate
+
+```{r}
+#| label: decision-gate
+
+cat(strrep("=", 60), "\n")
+cat("DECISION GATE 2h\n")
+cat(strrep("=", 60), "\n\n")
+
+checks <- list(
+  dest_scores_saved      = file.exists("output/tables/02h_desttype_scores.csv"),
+  permutation_test_saved = file.exists("output/tables/02h_permutation_test.csv"),
+  scatter_saved          = file.exists("output/figures/02h_desttype_scatter.png"),
+  n_destinations         = nrow(dest_scores) == 10L
+)
+
+for (nm in names(checks)) {
+  cat(nm, ":", ifelse(checks[[nm]], "PASS", "FAIL"), "\n")
+}
+cat(strrep("=", 60), "\n")
+```

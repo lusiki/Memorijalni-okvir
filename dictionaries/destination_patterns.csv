@@ -1,0 +1,11 @@
+destination_id,destination_name,ilike_title,ilike_snippet,context_gate_required,context_gate_pattern
+1,Marija Bistrica,"%Marija Bistric%","%Marija Bistric%",FALSE,
+2,Trsat,"%Trsat%","%Trsat%",FALSE,
+3,Sinj,"%Sinj%","%Sinj%",TRUE,"%hodočašć% OR %Gospa Sinjsk% OR %Čudotvorna Gospa% OR %crkv% OR %svetišt% OR %turiz% OR %Alka%"
+4,Aljmaš,"%Aljmaš%","%Aljmaš%",FALSE,
+5,Ludbreg,"%Ludbreg%","%Ludbreg%",TRUE,"%Predragocjen% OR %Krv Kristov% OR %svetišt% OR %crkv% OR %hodočašć% OR %turiz%"
+6,Krasno,"%Krasno%","%Krasno%",TRUE,"%Gospa% OR %crkv% OR %svetišt% OR %hodočašć% OR %turiz%"
+7,Voćin,"%Voćin%","%Voćin%",FALSE,
+8,Vepric,"%Vepric%","%Vepric%",FALSE,
+9,Nin,"%Nin%","%Nin%",TRUE,"%Gospa% OR %Zečev% OR %crkv% OR %svetišt% OR %hodočašć% OR %turiz%"
+10,Solin,"%Solin%","%Solin%",TRUE,"%Gospa% OR %Otok% OR %crkv% OR %svetišt% OR %hodočašć% OR %turiz%"

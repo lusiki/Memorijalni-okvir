@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+title: "Religious Tourism in Croatian Digital Media: Framing, Seasonality, and Platform Dynamics"
+message: "If you use this research or code, please cite as below."
+type: dataset
+authors:
+  - family-names: "Sikic"
+    given-names: "Luka"
+    orcid: ""
+  - family-names: "TBD"
+    given-names: "TBD"
+keywords:
+  - religious tourism
+  - digital media
+  - structural topic model
+  - Croatia
+  - computational social science
+  - DigiKat
+license: CC-BY-4.0
+repository-code: ""
+date-released: "2026-01-01"

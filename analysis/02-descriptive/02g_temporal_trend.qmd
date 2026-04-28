@@ -1,0 +1,168 @@
+---
+title: "Phase 2g: Temporal Framing Trends"
+subtitle: "Annual frame shares, tourism trend regression, COVID vs post-COVID"
+author: "DigiKat Destination Framing Sub-study"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    theme: cosmo
+    self-contained: true
+execute:
+  warning: false
+  message: false
+  eval: true
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(data.table)
+library(ggplot2)
+library(stringi)
+
+source("../../R/theme_reltur.R")
+source("../../R/join_dest_type.R")
+
+for (d in c("output/tables", "output/figures")) {
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+}
+```
+
+# 0. Configuration
+
+```{r}
+#| label: config
+
+config_2g <- list(
+  input_corpus = "data/destinations_analytical_final.rds",
+  seed = 2026L
+)
+set.seed(config_2g$seed)
+```
+
+# 1. Load Corpus
+
+```{r}
+#| label: load
+
+long <- readRDS(config_2g$input_corpus)
+setDT(long)
+
+if (!"dest_type_cat" %in% names(long)) long <- join_dest_type(long)
+if (!"year_num" %in% names(long)) {
+  long[, year_num := as.integer(format(date, "%Y")) - 2021L]
+}
+long[, year := as.integer(format(date, "%Y"))]
+
+cat("Corpus rows:", format(nrow(long), big.mark = ","), "\n")
+cat("Years covered:", paste(sort(unique(long$year)), collapse = ", "), "\n")
+cat("Destinations:", paste(sort(unique(long$destination)), collapse = ", "), "\n\n")
+```
+
+# 2. Annual Frame Shares per Destination
+
+```{r}
+#| label: annual-frames
+
+annual_frames <- long[, .N, by = .(destination, year, dominant_frame)]
+annual_frames[, total := sum(N), by = .(destination, year)]
+annual_frames[, pct := round(N / total * 100, 1)]
+
+fwrite(annual_frames, "output/tables/02g_annual_frames.csv")
+```
+
+# 3. Tourism-Share Trend Regression
+
+```{r}
+#| label: tourism-trend
+
+tourism_annual <- long[, .(
+  tourism_share = mean(dominant_frame %in%
+                       c("tourism_only", "religious_tourism_mixed"))
+), by = .(destination, year_num, dest_type_cat)]
+
+fwrite(tourism_annual, "output/tables/02g_tourism_annual.csv")
+
+trend_model <- lm(tourism_share ~ year_num + dest_type_cat + destination,
+                  data = tourism_annual)
+cat("Tourism share trend regression:\n")
+print(summary(trend_model))
+```
+
+# 4. COVID vs Post-COVID Comparison
+
+```{r}
+#| label: covid-comparison
+
+long[, period := fifelse(year == 2021L, "covid_2021", "post_covid")]
+
+period_frames <- long[, .N, by = .(destination, period, dominant_frame)]
+period_frames[, total := sum(N), by = .(destination, period)]
+period_frames[, pct := round(N / total * 100, 1)]
+
+period_wide <- dcast(
+  period_frames[dominant_frame == "religious_only"],
+  destination ~ period,
+  value.var = "pct",
+  fill = 0
+)
+setnames(period_wide,
+         c("covid_2021", "post_covid"),
+         c("religious_only_pct_2021", "religious_only_pct_post"),
+         skip_absent = TRUE)
+
+fwrite(period_wide, "output/tables/02g_covid_frame_comparison.csv")
+print(period_wide)
+```
+
+# 5. Plot: Tourism Share by Year
+
+```{r}
+#| label: tourism-trend-plot
+
+p_trend <- ggplot(
+  tourism_annual,
+  aes(x = year_num + 2021L, y = tourism_share * 100,
+      colour = destination, group = destination)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  facet_wrap(~ dest_type_cat, ncol = 1, scales = "free_y") +
+  scale_x_continuous(breaks = 2021:2024) +
+  labs(x = NULL, y = "Tourism frame share (%)",
+       title = "Godišnje kretanje turističkog okvira po destinaciji",
+       colour = "Destinacija") +
+  theme_reltur() +
+  theme(legend.position = "right")
+
+ggsave("output/figures/02g_tourism_trend.png", p_trend,
+       width = 18, height = 14, dpi = 300)
+p_trend
+```
+
+# 6. Decision Gate
+
+```{r}
+#| label: decision-gate
+
+cat(strrep("=", 60), "\n")
+cat("DECISION GATE 2g\n")
+cat(strrep("=", 60), "\n\n")
+
+checks <- list(
+  corpus_loaded       = nrow(long) > 0,
+  dest_type_present   = "dest_type_cat" %in% names(long),
+  annual_frames_saved = file.exists("output/tables/02g_annual_frames.csv"),
+  tourism_plot_saved  = file.exists("output/figures/02g_tourism_trend.png"),
+  trend_model_ok      = !is.null(trend_model)
+)
+
+for (nm in names(checks)) {
+  cat(nm, ":", ifelse(checks[[nm]], "PASS", "FAIL"), "\n")
+}
+cat(strrep("=", 60), "\n")
+```

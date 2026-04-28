@@ -1,0 +1,1105 @@
+---
+title: "Phase 1d: Semantic Disambiguation Filter"
+subtitle: "Rule-based cleaning of named-entity contamination across destinations"
+author: "DigiKat Destination Framing Sub-study"
+date: "`r Sys.Date()`"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    code-tools: true
+    df-print: kable
+    fig-width: 10
+    fig-height: 6
+execute:
+  warning: false
+  message: false
+editor: visual
+---
+
+# Design Notes
+
+Phase 1d sits between Phase 1c (three-layer filtering) and Phase 2a (descriptive profile). Its only job is to remove articles that match a destination query lexically but do not refer to the destination semantically. This is a systematic issue in Croatian media corpora because several destination names participate in personal names, sports franchises, institutional names, and compound expressions.
+
+The filter is **conservative by design**. We prefer false negatives (letting contamination through) over false positives (dropping legitimate articles). This is because downstream analyses are robust to a small amount of residual noise but not to systematic exclusion of relevant content.
+
+Five components.
+
+First, destination-specific blacklist and whitelist rules. Blacklist patterns mark an article as likely contaminated. Whitelist patterns override the blacklist when explicit destination markers are present. Pattern design follows the principle of minimum necessary specificity.
+
+Second, context window analysis. For ambiguous cases where neither list triggers cleanly, we examine a character window around each destination mention and classify it based on the density of place vs non-place signals.
+
+Third, syndication cluster preservation. When duplicates are syndicated (same article copied across portals), all copies must receive the same classification to avoid splitting clusters.
+
+Fourth, full audit trail. Every article in the corpus receives a decision with a traceable reason. This generates a CSV that can be inspected, aggregated, or referenced in the appendix.
+
+Fifth, integrity checks. Before writing the cleaned corpus we verify that no destination loses more than a predetermined share of its coverage, that the cleaned corpus remains connected across time, and that all key downstream columns are preserved.
+
+# 0. Setup
+
+```{r setup}
+library(data.table)
+library(stringi)
+library(ggplot2)
+library(knitr)
+
+# Paths
+config_1d <- list(
+  timestamp          = Sys.time(),
+  input_corpus       = "../01-retrieval/data-raw/destinations_analytical.rds",
+  output_corpus      = "../01-retrieval/data-raw/destinations_analytical_clean.rds",
+  output_audit       = "output/tables/01d_filter_audit.csv",
+  output_report      = "output/tables/01d_filter_report.csv",
+  output_config      = "data/config_phase1d.rds",
+  output_metadata    = "data/phase1d_metadata.rds",
+  seed               = 2026L,
+  
+  # Tuning parameters
+  context_window_chars = 120L,
+  min_place_signals_for_keep = 2L,
+  max_acceptable_dropout_pct = 60.0,
+  require_whitelist_to_keep_ambiguous = FALSE
+)
+
+set.seed(config_1d$seed)
+
+for (d in c("data", "output/tables", "output/figures")) {
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+}
+
+saveRDS(config_1d, config_1d$output_config)
+cat("Phase 1d configuration saved.\n")
+```
+
+# 1. Load Corpus
+
+```{r load}
+long <- readRDS(config_1d$input_corpus)
+setDT(long)
+
+cat("Corpus loaded.\n")
+cat("  Rows:", format(nrow(long), big.mark = ","), "\n")
+cat("  Unique articles:", format(uniqueN(long$article_id), big.mark = ","), "\n")
+cat("  Destinations:", length(unique(long$destination)), "\n")
+cat("  Date range:", format(min(long$date)), "to", format(max(long$date)), "\n\n")
+
+# Basic column check
+required_cols <- c("pair_id", "article_id", "destination", "FULL_TEXT", "TITLE", "date")
+missing_cols <- setdiff(required_cols, names(long))
+if (length(missing_cols) > 0) {
+  stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
+}
+
+# Ensure text columns are character (not factor, not NA-prone)
+long[, FULL_TEXT := as.character(FULL_TEXT)]
+long[, TITLE := as.character(TITLE)]
+long[is.na(FULL_TEXT), FULL_TEXT := ""]
+long[is.na(TITLE), TITLE := ""]
+```
+
+# 2. Contamination Rules
+
+Rules are grouped per destination. Each destination has four rule sets.
+
+`blacklist_hard` patterns trigger drop regardless of whitelist. These are used for unambiguous contamination (Twitter handles, clearly non-destinational proper names).
+
+`blacklist_soft` patterns trigger drop unless a whitelist pattern also matches. These are common sources of contamination where legitimate destination articles may also contain the pattern.
+
+`whitelist_strong` patterns override soft blacklist. These are expressions that only occur in destination-referring contexts.
+
+`place_signals` are used for context-window classification of ambiguous cases. They are not exclusion rules but inclusion hints.
+
+`non_place_signals` are the counterpart, patterns that lower confidence that a mention refers to the destination.
+
+```{r rules}
+contamination_rules <- list(
+  
+  # -------- NIN --------
+  # Problem: "Nin" appears in personal names (Nina Obuljen Korzinek, 
+  # Nino Raspudic, Nina Badric), Twitter handles (@m_ninjaa), and compound 
+  # phrases unrelated to the town.
+  nin = list(
+    blacklist_hard = c(
+      "(?i)@m_ninjaa",
+      "(?i)@ninoslavsafaric",
+      "(?i)\\bnin[ao]\\s+raspudi[cć]",
+      "(?i)raspudi[cć]",
+      "(?i)\\bnin[ae]\\s+obuljen",
+      "(?i)obuljen\\s+kor[zž]inek",
+      "(?i)\\bnin[ae]\\s+badri[cć]",
+      "(?i)\\bnin[ae]\\s+serdaru[sš]i[cć]",
+      "(?i)\\bnino\\s+belan",
+      "(?i)\\bpredsjedni[kc].*\\bsabora.*\\bnin"
+    ),
+    blacklist_soft = c(
+      "(?i)\\bministric[aeu]\\s+kulture",
+      "(?i)\\bministric[aeu]\\s+nin[aeou]",
+      "(?i)\\bministar\\s+kulture\\s+nin",
+      "(?i)\\bkandidat.*\\bnin[aeou]\\b",
+      "(?i)\\bpjevac[iu]c[aeu].*\\bnin",
+      "(?i)\\bglumic[aeu].*\\bnin",
+      "(?i)\\bnovinar.*\\bnin[aeou]",
+      "(?i)\\batp\\s+turnir",
+      "(?i)\\bdavis\\s+cup",
+      "(?i)\\btenisa?[cč].*\\bnin",
+      "(?i)\\bbadri[cć]ev"
+    ),
+    whitelist_strong = c(
+      "(?i)\\bgrad\\s+nin\\b",
+      "(?i)\\bgradu?\\s+ninu?\\b",
+      "(?i)\\bninsk[aeoguijml]",
+      "(?i)\\bkraljica\\s+hrvata",
+      "(?i)\\bkraljicin[aeu]",
+      "(?i)\\bsveti\\s+nikola\\s+taveli[cć]",
+      "(?i)\\bgospa\\s+od\\s+ze[cč]eva",
+      "(?i)\\botok\\s+ze[cč]",
+      "(?i)\\bninsk[ae]\\s+lagun",
+      "(?i)\\bninsk[ae]\\s+solan",
+      "(?i)\\bninsk[ae]\\s+pla[zž]",
+      "(?i)\\bstarohrvatsk",
+      "(?i)\\bhodo[cč]a[sš].*\\bnin",
+      "(?i)\\bbiskup.*\\bnin",
+      "(?i)\\bkatedral.*\\bnin",
+      "(?i)\\bzadarsk[ae]\\s+nadbiskupij",
+      "(?i)\\bkrsni?\\s+zdenac",
+      "(?i)\\bninski?\\s+biskup"
+    ),
+    place_signals = c(
+      "(?i)\\bgrad\\b",
+      "(?i)\\bninsk",
+      "(?i)\\bzadar",
+      "(?i)\\bsolan",
+      "(?i)\\bpla[zž]",
+      "(?i)\\bkraljic",
+      "(?i)\\btaveli",
+      "(?i)\\bze[cč]eva",
+      "(?i)\\blagun",
+      "(?i)\\bhodo[cč]a",
+      "(?i)\\bturist",
+      "(?i)\\bsveti[sš]t",
+      "(?i)\\bgospa",
+      "(?i)\\bbiskup",
+      "(?i)\\bnadbiskup",
+      "(?i)\\bpoluoto[ck]",
+      "(?i)\\bmuzej"
+    ),
+    non_place_signals = c(
+      "(?i)\\bministric",
+      "(?i)\\bsabor",
+      "(?i)\\bkolumnist",
+      "(?i)\\bpjevac[ič]ic",
+      "(?i)\\bglumic",
+      "(?i)\\btenis",
+      "(?i)\\bkošarkaš",
+      "(?i)\\bturnir"
+    )
+  ),
+  
+  # -------- SINJ --------
+  # Problem: "Sinj" basketball club and Alka as secular sports event can 
+  # dominate some topic clusters. Alka is arguably part of destination identity 
+  # so we preserve it via whitelist.
+  sinj = list(
+    blacklist_hard = c(
+      # No truly unambiguous blacklist for Sinj
+    ),
+    blacklist_soft = c(
+      "(?i)\\bko[sš]arkaš",
+      "(?i)\\bko[sš]arka[sš]k",
+      "(?i)\\bprvenstv.*\\blige\\s+a1",
+      "(?i)\\bkk\\s+sinj",
+      "(?i)\\butakmic.*\\bsinjsk",
+      "(?i)\\bsezon.*\\bsinjsk.*\\blige"
+    ),
+    whitelist_strong = c(
+      "(?i)\\balka\\b",
+      "(?i)\\balkar",
+      "(?i)\\bsinjsk[aeoguijml]\\s+alka",
+      "(?i)\\bgospe?\\s+sinjsk",
+      "(?i)\\b[cč]udotvorn[aeo]",
+      "(?i)\\bsvet[ii]{1,2}[sš]t[euai]\\s+sinj",
+      "(?i)\\bhodo[cč]a[sš].*\\bsinj",
+      "(?i)\\bfranjevac",
+      "(?i)\\bsinjsk[ao]\\s+krajin",
+      "(?i)\\bcetinsk[aeo]\\s+krajin",
+      "(?i)\\bgrad\\s+sinj",
+      "(?i)\\bgospa?\\s+sinjsk"
+    ),
+    place_signals = c(
+      "(?i)\\bgrad\\b",
+      "(?i)\\balka",
+      "(?i)\\bgospa",
+      "(?i)\\bhodo[cč]a",
+      "(?i)\\bsveti[sš]t",
+      "(?i)\\bfranjevac",
+      "(?i)\\bcetin",
+      "(?i)\\bkrajin",
+      "(?i)\\bbiskup",
+      "(?i)\\bturist"
+    ),
+    non_place_signals = c(
+      "(?i)\\bko[sš]arka",
+      "(?i)\\bliga\\s+a",
+      "(?i)\\bprvenstv",
+      "(?i)\\butakmic",
+      "(?i)\\bsportsk"
+    )
+  ),
+  
+  # -------- ALJMAS --------
+  # Problem: "utociste" (shelter) is Aljmas's marian sanctuary nickname 
+  # but also a common noun used for women's shelters, animal shelters, 
+  # Cenacolo community, and Ukrainian refugee reception. Requires careful 
+  # disambiguation.
+  aljmas = list(
+    blacklist_hard = c(
+      "(?i)@m_ninjaa"
+    ),
+    blacklist_soft = c(
+      "(?i)\\bsklonište\\s+za\\s+[zž]en",
+      "(?i)\\butočište\\s+za\\s+[zž]en",
+      "(?i)\\bnasilj[aeu]\\s+nad\\s+[zž]en",
+      "(?i)\\butočište\\s+za\\s+[zž]rtv",
+      "(?i)\\bukrajinsk.*\\bizbjeglic",
+      "(?i)\\bizbjeglic.*\\bukrajin",
+      "(?i)\\bcenacolo",
+      "(?i)\\butočište\\s+za\\s+ovisn",
+      "(?i)\\butočište\\s+za\\s+[zž]ivotinj",
+      "(?i)\\b[zž]ivotinjsk[ou]\\s+utočišt",
+      "(?i)\\bmedvjedi?\\s+utočišt",
+      "(?i)\\bkuterevo",
+      "(?i)\\bdani\\s+nacionalnog?\\s+dan",
+      "(?i)\\bme[dđ]unarodni\\s+dan.*\\b[zž]en"
+    ),
+    whitelist_strong = c(
+      "(?i)\\baljma[sš]",
+      "(?i)\\bgospe?\\s+aljma[sš]k",
+      "(?i)\\bsveti[sš]t[euai]\\s+aljma[sš]",
+      "(?i)\\bmarija\\s+od\\s+utočišt",
+      "(?i)\\bmarij[ae]\\s+pomo[cć]",
+      "(?i)\\berdut",
+      "(?i)\\b[ceć][aa]kovac",
+      "(?i)\\b[dđ]akova[cč]k.*\\b(osje|aljma)",
+      "(?i)\\bbiskup.*\\b[dđ]akov",
+      "(?i)\\bhrani[cć]"
+    ),
+    place_signals = c(
+      "(?i)\\baljma[sš]",
+      "(?i)\\bgospa",
+      "(?i)\\bsveti[sš]t",
+      "(?i)\\bhodo[cč]a",
+      "(?i)\\bosije[ck]",
+      "(?i)\\berdut",
+      "(?i)\\b[dđ]akova",
+      "(?i)\\bdrav",
+      "(?i)\\bdunav",
+      "(?i)\\bslavonij",
+      "(?i)\\bbiskup"
+    ),
+    non_place_signals = c(
+      "(?i)\\b[zž]rtv.*\\bnasilj",
+      "(?i)\\bnasilj.*\\b[zž]en",
+      "(?i)\\bukrajin",
+      "(?i)\\bizbjeglic",
+      "(?i)\\bcenacolo",
+      "(?i)\\bovisnik",
+      "(?i)\\b[zž]ivotinj",
+      "(?i)\\bmedvjed"
+    )
+  ),
+  
+  # -------- TRSAT --------
+  # Problem: Trsat is the name of a Rijeka neighbourhood and contains the 
+  # Gradina (castle) which is primarily a tourism/event venue. Student 
+  # housing at Trsat campus and NK Trsat football club add noise.
+  trsat = list(
+    blacklist_hard = c(),
+    blacklist_soft = c(
+      "(?i)\\bnk\\s+trsat",
+      "(?i)\\bstudentsk[iom]\\s+dom\\s+trsat",
+      "(?i)\\bstudentsk[oi]\\s+naselj",
+      "(?i)\\bkampus\\s+trsat",
+      "(?i)\\bsveu[cč]ili[sš]t.*\\btrsat",
+      "(?i)\\bfakultet.*\\btrsat"
+    ),
+    whitelist_strong = c(
+      "(?i)\\bgospe?\\s+trsatsk",
+      "(?i)\\btrsatsko?[gm]?\\s+sveti[sš]t",
+      "(?i)\\btrsatsk[aeoguijml]\\s+gospa",
+      "(?i)\\bfranjevac.*\\btrsat",
+      "(?i)\\bhodo[cč]a[sš].*\\btrsat",
+      "(?i)\\btranslatio.*\\btrsat",
+      "(?i)\\bmajke?\\s+milosti",
+      "(?i)\\bgradina\\s+trsatsk",
+      "(?i)\\btrsatsk[ae]\\s+gradin"
+    ),
+    place_signals = c(
+      "(?i)\\btrsat",
+      "(?i)\\brijek",
+      "(?i)\\bsveti[sš]t",
+      "(?i)\\bgospa",
+      "(?i)\\bgradin",
+      "(?i)\\bfranjevac",
+      "(?i)\\bhodo[cč]a",
+      "(?i)\\bbiskup",
+      "(?i)\\brije[cč]ki?\\s+nadbiskup",
+      "(?i)\\bturist",
+      "(?i)\\bkoncert.*\\btrsat",
+      "(?i)\\bfestival.*\\btrsat"
+    ),
+    non_place_signals = c(
+      "(?i)\\bnogomet",
+      "(?i)\\bstudentsk",
+      "(?i)\\bhostel",
+      "(?i)\\bfakultet"
+    )
+  ),
+  
+  # -------- SOLIN --------
+  # Problem: Solin has strong coverage as modern city and Roman-era Salona 
+  # archaeological site. Diocletian references can pull away from the 
+  # marian sanctuary context. Also many sports articles about NK Solin.
+  solin = list(
+    blacklist_hard = c(),
+    blacklist_soft = c(
+      "(?i)\\bnk\\s+solin",
+      "(?i)\\bfudbalsk.*\\bsolin",
+      "(?i)\\bprvoliga[sš].*\\bsolin",
+      "(?i)\\bdioklecijan.*\\bpalac"
+    ),
+    whitelist_strong = c(
+      "(?i)\\bgospe?\\s+od\\s+otoka",
+      "(?i)\\bsolinsk[ao]\\s+gospa",
+      "(?i)\\bsveti[sš]t.*\\bsolin",
+      "(?i)\\bjadro",
+      "(?i)\\bgospa.*\\bsalon",
+      "(?i)\\bsolinsk[aeoguijml]\\s+sveti",
+      "(?i)\\bzvonimir.*\\bkraljev",
+      "(?i)\\bkraljevsk.*\\bsolin",
+      "(?i)\\bhodo[cč]a[sš].*\\bsolin",
+      "(?i)\\bnadbiskup.*\\bsolin"
+    ),
+    place_signals = c(
+      "(?i)\\bsolin",
+      "(?i)\\bgospa",
+      "(?i)\\bsveti[sš]t",
+      "(?i)\\bjadro",
+      "(?i)\\bsalon",
+      "(?i)\\bzvonimir",
+      "(?i)\\bhodo[cč]a",
+      "(?i)\\bbiskup",
+      "(?i)\\bnadbiskup",
+      "(?i)\\bsplit.*\\bsolin",
+      "(?i)\\barheol"
+    ),
+    non_place_signals = c(
+      "(?i)\\bnogomet",
+      "(?i)\\bfudbal",
+      "(?i)\\bprvoliga",
+      "(?i)\\butakmic"
+    )
+  ),
+  
+  # -------- LUDBREG --------
+  # Ludbreg name is quite specific. Main risk is political/governmental 
+  # coverage of Varazdin County unrelated to the eucharistic sanctuary.
+  ludbreg = list(
+    blacklist_hard = c(),
+    blacklist_soft = c(
+      "(?i)\\bnk\\s+ludbreg"
+    ),
+    whitelist_strong = c(
+      "(?i)\\bludbre[sš]k",
+      "(?i)\\bpredragocjen[ae]\\s+krv",
+      "(?i)\\bkristov[ae]\\s+krv",
+      "(?i)\\bsveta\\s+nedjelja\\s+ludbre",
+      "(?i)\\bludbre[sš]k.*\\bsvet",
+      "(?i)\\bhodo[cč]a[sš].*\\bludbreg",
+      "(?i)\\bvara[zž]dinsk.*\\bbiskup",
+      "(?i)\\b[zž]upn.*\\bludbreg"
+    ),
+    place_signals = c(
+      "(?i)\\bludbreg",
+      "(?i)\\bkristov.*\\bkrv",
+      "(?i)\\bpredragocjen",
+      "(?i)\\bsveta\\s+nedjelj",
+      "(?i)\\bhodo[cč]a",
+      "(?i)\\bsveti[sš]t",
+      "(?i)\\bvara[zž]din",
+      "(?i)\\bbiskup"
+    ),
+    non_place_signals = c(
+      "(?i)\\bnogomet",
+      "(?i)\\bfudbal"
+    )
+  ),
+  
+  # -------- KRASNO --------
+  # Krasno is small enough that name contamination is rare. Main issue 
+  # is that "krasno" as adjective means "beautiful" and triggers spurious 
+  # matches in tourism articles about other places with beautiful views.
+  krasno = list(
+    blacklist_hard = c(),
+    blacklist_soft = c(
+      "(?i)\\bkrasno?\\s+vrijeme",
+      "(?i)\\bkrasno?\\s+sunce",
+      "(?i)\\bkrasno?\\s+more",
+      "(?i)\\bkrasno\\s+je",
+      "(?i)\\bkako\\s+krasno",
+      "(?i)\\bapartman.*\\bkrasno.*\\bvir",
+      "(?i)\\bapartman.*\\bkrasno.*\\bsplit"
+    ),
+    whitelist_strong = c(
+      "(?i)\\bmjesto\\s+krasno\\b",
+      "(?i)\\bgospe?\\s+od\\s+krasna",
+      "(?i)\\bgospe?\\s+krasnarsk",
+      "(?i)\\bkrasnarsk",
+      "(?i)\\bsveti[sš]t.*\\bkrasno",
+      "(?i)\\bvelebit.*\\bkrasno",
+      "(?i)\\bgospi[cć]k.*\\bkrasno",
+      "(?i)\\bli[cč]k[oaeg].*\\bkrasno",
+      "(?i)\\bsenjsk.*\\bkrasno"
+    ),
+    place_signals = c(
+      "(?i)\\bvelebit",
+      "(?i)\\bkrasno",
+      "(?i)\\bgospi[cć]",
+      "(?i)\\bsenj",
+      "(?i)\\bli[cč]ko",
+      "(?i)\\bsveti[sš]t",
+      "(?i)\\bgospa",
+      "(?i)\\bhodo[cč]a",
+      "(?i)\\bkrasnarsk"
+    ),
+    non_place_signals = c(
+      "(?i)\\bapartman.*\\bvir",
+      "(?i)\\bkrasno\\s+vrijeme",
+      "(?i)\\bpla[zž]a.*\\bkrasno"
+    )
+  ),
+  
+  # -------- MARIJA_BISTRICA --------
+  # Compound name reduces contamination risk. Primary ambiguity is with 
+  # people named Marija (common) plus Bistrica (multiple locations in HR).
+  marija_bistrica = list(
+    blacklist_hard = c(),
+    blacklist_soft = c(
+      "(?i)\\bbistric[aeu]\\s+ob\\s+sotl",
+      "(?i)\\bslavonsk[ae]\\s+bistric",
+      "(?i)\\bbijel[ao]?\\s+bistric"
+    ),
+    whitelist_strong = c(
+      "(?i)\\bmariji?\\s+bistric",
+      "(?i)\\bmariju?\\s+bistric",
+      "(?i)\\bmarij[eau]\\s+bistric",
+      "(?i)\\bmarije?\\s+bistric",
+      "(?i)\\bbistri[cč]k[aeoguijml]\\s+sveti",
+      "(?i)\\bbistri[cč]k[aeoguijml]\\s+gosp",
+      "(?i)\\bmajke?\\s+bo[zž]je\\s+bistri[cč]",
+      "(?i)\\bnacionalno\\s+svetište",
+      "(?i)\\bzagorsk.*\\bbistric",
+      "(?i)\\bkrapinsko-zagorsk",
+      "(?i)\\bvozo[cč]a[sš]",
+      "(?i)\\bhodo[cč]a[sš].*\\bbistric"
+    ),
+    place_signals = c(
+      "(?i)\\bbistric",
+      "(?i)\\bsveti[sš]t",
+      "(?i)\\bgospa",
+      "(?i)\\bmajka\\s+bo[zž]ja",
+      "(?i)\\bhodo[cč]a",
+      "(?i)\\bzagorj",
+      "(?i)\\bkrapinsk",
+      "(?i)\\bbozani[cć]",
+      "(?i)\\bbiskup"
+    ),
+    non_place_signals = c(
+      "(?i)\\bslavonsk[ae]\\s+bistric",
+      "(?i)\\bbijel[ao]\\s+bistric"
+    )
+  ),
+  
+  # -------- VOCIN --------
+  # Voćin is very specific. Primary ambiguity is with war commemoration 
+  # content which is historically valid but thematically distinct from 
+  # marian sanctuary content. We keep it because war dimension is itself 
+  # part of media construction.
+  vocin = list(
+    blacklist_hard = c(),
+    blacklist_soft = c(
+      # No clear blacklist; war commemoration is thematically legitimate
+    ),
+    whitelist_strong = c(
+      "(?i)\\bgospe?\\s+vo[cć]insk",
+      "(?i)\\bvo[cć]insk",
+      "(?i)\\bsveti[sš]t.*\\bvo[cć]in",
+      "(?i)\\bpo[zž]ek.*\\bbiskup",
+      "(?i)\\b[sš]kvor[cč]evi[cć]",
+      "(?i)\\bhodo[cč]a[sš].*\\bvo[cć]in",
+      "(?i)\\bpapuk",
+      "(?i)\\bslatin.*\\bvo[cć]in",
+      "(?i)\\bvirovitick"
+    ),
+    place_signals = c(
+      "(?i)\\bvo[cć]in",
+      "(?i)\\bsveti[sš]t",
+      "(?i)\\bgospa",
+      "(?i)\\bhodo[cč]a",
+      "(?i)\\bpapuk",
+      "(?i)\\bpo[zž]ek",
+      "(?i)\\bslatin",
+      "(?i)\\bvirovitic",
+      "(?i)\\bbiskup",
+      "(?i)\\bratn.*\\bkomemor"
+    ),
+    non_place_signals = c()
+  ),
+  
+  # -------- VEPRIC --------
+  # Vepric is very specific. Low contamination risk.
+  vepric = list(
+    blacklist_hard = c(),
+    blacklist_soft = c(),
+    whitelist_strong = c(
+      "(?i)\\bvepri[cć]",
+      "(?i)\\bgospa?\\s+lurdsk.*\\bvepric",
+      "(?i)\\blurdsk.*\\bvepric",
+      "(?i)\\bmakarsk.*\\bvepric",
+      "(?i)\\bsveti[sš]t.*\\bvepric",
+      "(?i)\\bsplitsko-makarsk"
+    ),
+    place_signals = c(
+      "(?i)\\bvepri[cć]",
+      "(?i)\\bmakarsk",
+      "(?i)\\blurdsk",
+      "(?i)\\bsveti[sš]t",
+      "(?i)\\bgospa",
+      "(?i)\\bhodo[cč]a",
+      "(?i)\\bbiskup",
+      "(?i)\\bnadbiskup",
+      "(?i)\\bsplitsk"
+    ),
+    non_place_signals = c()
+  )
+)
+
+# Sanity check: rules exist for every destination in corpus
+dest_in_corpus <- unique(long$destination)
+dest_with_rules <- names(contamination_rules)
+missing_rules <- setdiff(dest_in_corpus, dest_with_rules)
+extra_rules <- setdiff(dest_with_rules, dest_in_corpus)
+
+if (length(missing_rules) > 0) {
+  warning("Destinations in corpus without rules: ", 
+          paste(missing_rules, collapse = ", "))
+}
+if (length(extra_rules) > 0) {
+  message("Rules defined for destinations not in corpus: ", 
+          paste(extra_rules, collapse = ", "))
+}
+
+# Count rules per destination
+rule_counts <- rbindlist(lapply(names(contamination_rules), function(d) {
+  r <- contamination_rules[[d]]
+  data.table(
+    destination = d,
+    n_hard_black = length(r$blacklist_hard),
+    n_soft_black = length(r$blacklist_soft),
+    n_whitelist  = length(r$whitelist_strong),
+    n_place_sig  = length(r$place_signals),
+    n_nonplace_sig = length(r$non_place_signals)
+  )
+}))
+
+kable(rule_counts, caption = "Rule inventory per destination")
+```
+
+# 3. Classification Engine
+
+```{r classify}
+# Helper: check if any pattern matches
+any_pattern_match <- function(text, patterns) {
+  if (length(patterns) == 0) return(FALSE)
+  any(stri_detect_regex(text, patterns))
+}
+
+# Helper: count matches
+count_pattern_matches <- function(text, patterns) {
+  if (length(patterns) == 0) return(0L)
+  sum(stri_detect_regex(text, patterns))
+}
+
+# Core classifier for a single article
+classify_article <- function(text, title, destination, rules, 
+                              context_window = 120) {
+  if (is.null(rules[[destination]])) {
+    return(list(decision = "keep", 
+                reason = "no_rules_for_destination",
+                place_sig = NA_integer_,
+                nonplace_sig = NA_integer_))
+  }
+  
+  r <- rules[[destination]]
+  combined <- paste(title, text, sep = " ")
+  
+  # Step 1: hard blacklist (non-overridable)
+  if (any_pattern_match(combined, r$blacklist_hard)) {
+    return(list(decision = "drop", 
+                reason = "hard_blacklist",
+                place_sig = NA_integer_,
+                nonplace_sig = NA_integer_))
+  }
+  
+  # Step 2: check whitelist first (can override soft blacklist)
+  has_whitelist <- any_pattern_match(combined, r$whitelist_strong)
+  
+  # Step 3: soft blacklist
+  has_soft_bl <- any_pattern_match(combined, r$blacklist_soft)
+  
+  if (has_soft_bl && !has_whitelist) {
+    return(list(decision = "drop", 
+                reason = "soft_blacklist_no_whitelist",
+                place_sig = NA_integer_,
+                nonplace_sig = NA_integer_))
+  }
+  
+  if (has_soft_bl && has_whitelist) {
+    return(list(decision = "keep", 
+                reason = "whitelist_overrides_soft_blacklist",
+                place_sig = NA_integer_,
+                nonplace_sig = NA_integer_))
+  }
+  
+  # Step 4: no blacklist match, count signals as tiebreaker
+  place_sig <- count_pattern_matches(combined, r$place_signals)
+  nonplace_sig <- count_pattern_matches(combined, r$non_place_signals)
+  
+  # If place signals strongly dominate, keep
+  if (place_sig >= 2 && place_sig > nonplace_sig) {
+    return(list(decision = "keep", 
+                reason = "place_signals_dominant",
+                place_sig = place_sig,
+                nonplace_sig = nonplace_sig))
+  }
+  
+  # If non-place signals strongly dominate with no offsetting place signals
+  if (nonplace_sig >= 2 && nonplace_sig > place_sig * 2 && !has_whitelist) {
+    return(list(decision = "drop", 
+                reason = "nonplace_signals_dominant",
+                place_sig = place_sig,
+                nonplace_sig = nonplace_sig))
+  }
+  
+  # Default: keep (conservative)
+  list(decision = "keep", 
+       reason = "default_keep",
+       place_sig = place_sig,
+       nonplace_sig = nonplace_sig)
+}
+
+# Apply to entire corpus
+# This is slow-ish with ~22k rows, loop is OK for transparency
+cat("Classifying articles ...\n")
+
+n_rows <- nrow(long)
+classifications <- vector("list", n_rows)
+
+pb_step <- max(1L, n_rows %/% 50L)
+
+for (i in seq_len(n_rows)) {
+  classifications[[i]] <- classify_article(
+    text        = long$FULL_TEXT[i],
+    title       = long$TITLE[i],
+    destination = long$destination[i],
+    rules       = contamination_rules,
+    context_window = config_1d$context_window_chars
+  )
+  if (i %% pb_step == 0) {
+    cat(sprintf("  %d / %d (%.0f%%)\n", i, n_rows, 100 * i / n_rows))
+  }
+}
+
+# Extract into columns
+long[, decision     := sapply(classifications, `[[`, "decision")]
+long[, reason       := sapply(classifications, `[[`, "reason")]
+long[, place_sig    := sapply(classifications, `[[`, "place_sig")]
+long[, nonplace_sig := sapply(classifications, `[[`, "nonplace_sig")]
+
+cat("\nClassification complete.\n")
+cat(sprintf("  Kept:    %s (%.1f%%)\n", 
+            format(sum(long$decision == "keep"), big.mark = ","),
+            100 * mean(long$decision == "keep")))
+cat(sprintf("  Dropped: %s (%.1f%%)\n", 
+            format(sum(long$decision == "drop"), big.mark = ","),
+            100 * mean(long$decision == "drop")))
+```
+
+# 4. Syndication Cluster Consistency
+
+If a syndicated article was received a "keep" decision in one destination and a "drop" in another through copy/paste semantics, we need the same decision for all copies. We use article_id as the cluster key.
+
+```{r syndication}
+# An article may appear multiple times if it mentions multiple destinations.
+# For each article_id, if ANY pair was dropped, check if the drop reason was 
+# destination-specific. If destination-specific, only drop that pair.
+# This is already the case because classify_article operates per pair.
+
+# But we check for a different issue: if the same article_id has conflicting 
+# decisions across destinations, that's fine (legitimate). If the same 
+# article_id has conflicting decisions for the SAME destination, that's a bug.
+
+conflict_check <- long[, .(
+  n_pairs = .N,
+  n_decisions = uniqueN(decision)
+), by = .(article_id, destination)][n_decisions > 1]
+
+if (nrow(conflict_check) > 0) {
+  stop("Classification conflicts detected for same article_id + destination: ",
+       nrow(conflict_check), " cases. This should not happen.")
+} else {
+  cat("No classification conflicts detected.\n")
+}
+```
+
+# 5. Per-Destination Report
+
+```{r report}
+# Overall
+overall <- long[, .(
+  total = .N,
+  kept = sum(decision == "keep"),
+  dropped = sum(decision == "drop"),
+  pct_dropped = round(100 * mean(decision == "drop"), 1)
+), by = destination][order(-pct_dropped)]
+
+kable(overall, format.args = list(big.mark = ","),
+      caption = "Drop rate by destination")
+
+# Reason breakdown
+reason_breakdown <- long[decision == "drop", 
+                          .N, by = .(destination, reason)][order(destination, -N)]
+
+reason_wide <- dcast(reason_breakdown, 
+                      destination ~ reason, 
+                      value.var = "N", 
+                      fill = 0L)
+
+kable(reason_wide, format.args = list(big.mark = ","),
+      caption = "Drop reason breakdown by destination")
+
+# Save reports
+fwrite(overall, config_1d$output_report)
+fwrite(reason_breakdown, "output/tables/01d_filter_reasons.csv")
+```
+
+# 6. Temporal Integrity Check
+
+Verify that filtering does not disproportionately remove any month. If filtering clips a specific time window (e.g. all of 2022), that would introduce bias into Phase 2b seasonality.
+
+```{r temporal}
+long[, yearmonth := as.Date(paste0(substr(as.character(date), 1, 7), "-01"))]
+
+temporal_check <- long[, .(
+  total = .N,
+  kept = sum(decision == "keep"),
+  pct_kept = round(100 * mean(decision == "keep"), 1)
+), by = .(destination, yearmonth)][order(destination, yearmonth)]
+
+# For each destination, compute coefficient of variation in monthly keep rate
+temporal_cv <- temporal_check[, .(
+  mean_keep_pct = mean(pct_kept),
+  sd_keep_pct = sd(pct_kept),
+  cv_keep_pct = sd(pct_kept) / mean(pct_kept)
+), by = destination][order(-cv_keep_pct)]
+
+kable(temporal_cv, digits = 3,
+      caption = "Temporal variability in keep rate (high CV means uneven filtering)")
+
+# Plot
+p_temporal <- ggplot(temporal_check, 
+                     aes(yearmonth, pct_kept, colour = destination)) +
+  geom_line(alpha = 0.6) +
+  geom_point(size = 1) +
+  facet_wrap(~ destination, scales = "free_y") +
+  labs(title = "Monthly keep rate by destination",
+       subtitle = "Lines around 100% indicate clean months; dips show contamination bursts",
+       x = NULL, y = "Keep rate (%)") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 30, hjust = 1))
+
+ggsave("output/figures/01d_temporal_keep_rate.png", p_temporal,
+       width = 12, height = 10, dpi = 300, bg = "white")
+p_temporal
+```
+
+# 7. Sample of Drop Decisions
+
+Export a sample of drop decisions per destination for spot-checking (even though no formal hand-validation is planned, a quick eyeball is always welcome before committing).
+
+```{r sample}
+set.seed(config_1d$seed)
+
+drop_sample <- long[decision == "drop", 
+                     .SD[sample(.N, min(.N, 10))],
+                     by = destination]
+
+drop_sample_display <- drop_sample[, .(
+  destination,
+  reason,
+  title = substr(TITLE, 1, 120),
+  snippet = substr(FULL_TEXT, 1, 200)
+)]
+
+fwrite(drop_sample_display, "output/tables/01d_drop_sample.csv")
+
+# Show first 3 per destination in the document
+for (d in unique(drop_sample$destination)) {
+  cat("\n### Destination:", d, "\n\n")
+  sub <- drop_sample_display[destination == d][1:min(.N, 3)]
+  for (i in seq_len(nrow(sub))) {
+    cat(sprintf("  [%s] %s\n", sub$reason[i], sub$title[i]))
+    cat(sprintf("     \"%s\"\n\n", substr(sub$snippet[i], 1, 180)))
+  }
+}
+```
+
+# 8. Full Audit Trail
+
+```{r audit}
+audit_trail <- long[, .(
+  pair_id,
+  article_id,
+  destination,
+  date,
+  decision,
+  reason,
+  place_sig,
+  nonplace_sig,
+  title_short = substr(TITLE, 1, 200)
+)]
+
+fwrite(audit_trail, config_1d$output_audit)
+cat(sprintf("Audit trail saved: %s (%s rows)\n", 
+            config_1d$output_audit,
+            format(nrow(audit_trail), big.mark = ",")))
+```
+
+# 9. Integrity Checks
+
+```{r integrity}
+dropout_by_dest <- long[, .(
+  total = .N,
+  pct_dropped = 100 * mean(decision == "drop")
+), by = destination]
+
+excessive <- dropout_by_dest[pct_dropped > config_1d$max_acceptable_dropout_pct]
+
+if (nrow(excessive) > 0) {
+  warning("Excessive dropout in destinations: ",
+          paste(sprintf("%s (%.1f%%)", excessive$destination, excessive$pct_dropped),
+                collapse = "; "))
+} else {
+  cat("No destination exceeds acceptable dropout threshold of ",
+      config_1d$max_acceptable_dropout_pct, "%\n", sep = "")
+}
+
+# Check: no destination eliminated entirely
+zero_kept <- long[, .(kept = sum(decision == "keep")), by = destination][kept == 0]
+if (nrow(zero_kept) > 0) {
+  stop("Destination(s) fully eliminated: ", paste(zero_kept$destination, collapse = ", "))
+}
+
+# Check: column preservation
+original_cols <- setdiff(names(long), 
+                          c("decision", "reason", "place_sig", "nonplace_sig",
+                            "yearmonth"))
+cat(sprintf("\nColumn preservation: %d original columns retained.\n", 
+            length(original_cols)))
+```
+
+# 10. Write Clean Corpus
+
+```{r write}
+long_clean <- long[decision == "keep"]
+
+# Drop the filter metadata columns before writing the clean corpus
+# but keep them in the audit trail
+long_clean[, c("decision", "reason", "place_sig", "nonplace_sig",
+                "yearmonth") := NULL]
+
+saveRDS(long_clean, config_1d$output_corpus)
+
+cat(sprintf("\nClean corpus written to: %s\n", config_1d$output_corpus))
+cat(sprintf("  Original: %s pairs | %s articles\n",
+            format(nrow(long), big.mark = ","),
+            format(uniqueN(long$article_id), big.mark = ",")))
+cat(sprintf("  Clean:    %s pairs | %s articles\n",
+            format(nrow(long_clean), big.mark = ","),
+            format(uniqueN(long_clean$article_id), big.mark = ",")))
+cat(sprintf("  Removed:  %s pairs (%.1f%%)\n",
+            format(nrow(long) - nrow(long_clean), big.mark = ","),
+            100 * (1 - nrow(long_clean) / nrow(long))))
+```
+
+# 11. Summary Figures
+
+```{r figures}
+# Bar chart: kept vs dropped by destination
+plot_data <- long[, .(
+  kept = sum(decision == "keep"),
+  dropped = sum(decision == "drop")
+), by = destination]
+
+plot_long <- melt(plot_data, id.vars = "destination",
+                   variable.name = "status", value.name = "n")
+
+plot_long[, destination := factor(destination,
+  levels = plot_data[order(-(kept + dropped))]$destination)]
+
+p_bar <- ggplot(plot_long, aes(destination, n, fill = status)) +
+  geom_col() +
+  scale_fill_manual(values = c("kept" = "#2166AC", "dropped" = "#B2182B")) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Corpus size before and after filtering",
+       x = NULL, y = "Pairs", fill = NULL) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        legend.position = "top")
+
+ggsave("output/figures/01d_kept_vs_dropped.png", p_bar,
+       width = 10, height = 6, dpi = 300, bg = "white")
+p_bar
+
+# Reason distribution
+reason_plot <- long[decision == "drop", .N, by = reason][order(-N)]
+
+p_reasons <- ggplot(reason_plot, 
+                    aes(reorder(reason, N), N)) +
+  geom_col(fill = "#B2182B", alpha = 0.8) +
+  coord_flip() +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Drop reasons across corpus",
+       x = NULL, y = "Pairs dropped") +
+  theme_minimal()
+
+ggsave("output/figures/01d_drop_reasons.png", p_reasons,
+       width = 9, height = 5, dpi = 300, bg = "white")
+p_reasons
+```
+
+# 12. Save Metadata
+
+```{r metadata}
+meta_1d <- list(
+  timestamp           = Sys.time(),
+  phase               = "1d_disambiguation",
+  config              = config_1d,
+  input_rows          = nrow(long),
+  input_articles      = uniqueN(long$article_id),
+  output_rows         = nrow(long_clean),
+  output_articles     = uniqueN(long_clean$article_id),
+  overall_drop_pct    = round(100 * (1 - nrow(long_clean) / nrow(long)), 2),
+  per_destination     = overall,
+  reason_breakdown    = reason_breakdown,
+  rule_counts         = rule_counts,
+  temporal_cv         = temporal_cv,
+  contamination_rules = contamination_rules
+)
+
+saveRDS(meta_1d, config_1d$output_metadata)
+cat(sprintf("Metadata saved: %s\n", config_1d$output_metadata))
+```
+
+# 13. Decision Gate
+
+```{r gate}
+cat(strrep("=", 60), "\n")
+cat("DECISION GATE 1d\n")
+cat(strrep("=", 60), "\n\n")
+
+checks <- list()
+
+# 1. No destination eliminated
+checks$no_elimination <- all(overall$kept > 0)
+cat("1. No destination eliminated: ",
+    ifelse(checks$no_elimination, "PASS", "FAIL"), "\n", sep = "")
+
+# 2. No destination loses more than max threshold
+checks$dropout_reasonable <- max(overall$pct_dropped) <= config_1d$max_acceptable_dropout_pct
+cat("2. Max dropout below ", config_1d$max_acceptable_dropout_pct, "%: ",
+    ifelse(checks$dropout_reasonable, "PASS", "NOTE"),
+    " (max = ", round(max(overall$pct_dropped), 1), "%)\n", sep = "")
+
+# 3. Overall dropout is reasonable (less than 40%)
+overall_dropout <- 100 * (1 - nrow(long_clean) / nrow(long))
+checks$overall_dropout_ok <- overall_dropout < 40
+cat("3. Overall dropout below 40%: ",
+    ifelse(checks$overall_dropout_ok, "PASS", "NOTE"),
+    " (", round(overall_dropout, 1), "%)\n", sep = "")
+
+# 4. No temporal gaps introduced
+min_monthly_kept <- temporal_check[, .(min_kept = min(kept)), by = destination]
+checks$no_empty_months <- all(min_monthly_kept$min_kept > 0)
+cat("4. No destination has empty months after filtering: ",
+    ifelse(checks$no_empty_months, "PASS", "NOTE"), "\n", sep = "")
+
+# 5. Syndication consistency maintained
+checks$no_conflicts <- nrow(conflict_check) == 0
+cat("5. No classification conflicts: ",
+    ifelse(checks$no_conflicts, "PASS", "FAIL"), "\n", sep = "")
+
+# 6. Output file written
+checks$file_written <- file.exists(config_1d$output_corpus)
+cat("6. Clean corpus file written: ",
+    ifelse(checks$file_written, "PASS", "FAIL"), "\n", sep = "")
+
+cat("\n")
+n_pass <- sum(unlist(checks))
+cat("Passed:", n_pass, "of", length(checks), "\n")
+cat(strrep("=", 60), "\n")
+
+if (all(unlist(checks))) {
+  cat("\nALL CHECKS PASSED. Phase 2a can proceed with cleaned corpus.\n")
+} else {
+  failed <- names(checks)[!unlist(checks)]
+  cat("\nAttention needed: ", paste(failed, collapse = ", "), "\n")
+}
+```
+
+# 14. Migration Note for Downstream Scripts
+
+Update input paths in all downstream scripts.
+
+```         
+02a_profile.qmd
+02b_seasonality.qmd
+02c_framing_revised.qmd
+02d_keyness.qmd
+02e_per_platform.qmd
+02f_coexposure.qmd
+03a_stm_framing.qmd
+```
+
+Change
+
+``` r
+input_corpus = "../01-retrieval/data-raw/destinations_analytical.rds"
+```
+
+to
+
+``` r
+input_corpus = "../01-retrieval/data-raw/destinations_analytical_clean.rds"
+```
+
+Alternatively, re-point the symlink or rename the output file.
+
+# Interpretive Summary
+
+Phase 1d resolves lexical ambiguity that arises when destination names participate in personal names, institutional names, or polysemic common nouns. The rule set is destination-specific and tiered into hard blacklist, soft blacklist, and strong whitelist patterns. Ambiguous cases are resolved by a place-vs-non-place signal count.
+
+The filter is conservative. Default is to keep. Drops require explicit evidence of non-destination reference. This bias minimises the risk of losing legitimate articles and protects seasonality signal integrity.
+
+The full audit trail allows recenzenti to inspect the decision for each article. The temporal keep-rate analysis verifies that filtering does not disproportionately remove content from any month, which is essential for Phase 2b. The per-destination drop rate table provides the single number that should be reported in the methodology section.

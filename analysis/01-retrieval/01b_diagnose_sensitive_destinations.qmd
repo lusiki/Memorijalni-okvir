@@ -1,0 +1,397 @@
+---
+title: "Phase 1b: Diagnostic Validation of Sensitive Destinations"
+subtitle: "Contamination check for Sinj, Nin, Solin before dictionary refinement"
+author: "DigiKat Destination Framing Sub-study"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    code-fold: false
+    theme: cosmo
+    self-contained: true
+execute:
+  warning: false
+  message: false
+  eval: true
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(data.table)
+library(stringi)
+library(ggplot2)
+library(knitr)
+library(DT)
+
+for (d in c("output/tables", "output/figures", "output/reports")) {
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+}
+```
+
+# Purpose
+
+Phase 1 retrieval produced an asymmetric corpus dominated by Sinj (119,330)
+and Nin (95,507). Religious register prevalence for these two destinations
+is far below the corpus mean, suggesting that the context gate admitted
+articles that are not actually about the religious tourism destinations.
+This script performs three diagnostics.
+
+1. Random snippet sampling from Sinj, Nin, and Solin to eyeball actual
+   content.
+2. Frequency analysis of surrounding tokens to identify dominant non-target
+   contexts (person names, sports, music, other polysemic uses).
+3. Cross tabulation of register indicators against destination matches to
+   quantify how many matches lack any religious or tourism anchor.
+
+Outputs inform a binary decision between two refinement strategies.
+Strategy A tightens destination patterns and context triggers. Strategy B
+adds a register forced gate (destination match AND religious/tourism
+register match) and accepts that descriptive coverage narrows to the
+religious tourism discourse itself.
+
+```{r}
+#| label: load-corpus
+
+long <- readRDS("data-raw/destinations_long.rds")
+cat("Loaded long format corpus.\n")
+cat("  Rows:", format(nrow(long), big.mark = ","), "\n")
+cat("  Columns:", ncol(long), "\n\n")
+```
+
+# 1. Random Snippet Sampling
+
+```{r}
+#| label: random-samples
+
+set.seed(2026)
+
+sensitive_dests <- c("sinj", "nin", "solin")
+n_per <- 50
+
+samples <- list()
+for (d in sensitive_dests) {
+  subset_d <- long[destination == d]
+  if (nrow(subset_d) > n_per) {
+    samples[[d]] <- subset_d[sample(.N, n_per)]
+  } else {
+    samples[[d]] <- subset_d
+  }
+}
+
+for (d in sensitive_dests) {
+  cat("=== ", toupper(d), " (", format(nrow(samples[[d]]), big.mark = ","),
+      " sampled) ===\n", sep = "")
+  cat("(", format(nrow(long[destination == d]), big.mark = ","),
+      " total in corpus)\n\n", sep = "")
+
+  display <- samples[[d]][, .(
+    date = format(date),
+    source = substr(FROM, 1, 25),
+    title = substr(TITLE, 1, 80),
+    snippet = substr(MENTION_SNIPPET, 1, 200),
+    religious = has_religious_register,
+    tourism = has_tourism_register,
+    scandal = has_scandal_register
+  )]
+
+  fwrite(display, paste0("output/tables/01b_sample_", d, ".csv"))
+
+  # print first 15 rows for quick visual check
+  for (i in 1:min(15, nrow(display))) {
+    cat("[", i, "] ", display$date[i], " | ", display$source[i], "\n", sep = "")
+    cat("    TITLE:  ", display$title[i], "\n", sep = "")
+    cat("    SNIP:   ", display$snippet[i], "\n", sep = "")
+    cat("    REG:    rel=", display$religious[i],
+        " tour=", display$tourism[i],
+        " scan=", display$scandal[i], "\n\n", sep = "")
+  }
+  cat("\n--- end of ", d, " sample. Full 50 in output/tables/01b_sample_", d, ".csv ---\n\n\n", sep = "")
+}
+```
+
+# 2. Register Cross Tabulation
+
+```{r}
+#| label: register-crosstab
+
+# articles with NO register hit at all
+register_presence <- long[, .(
+  n_pairs = .N,
+  no_register = sum(!has_religious_register & !has_tourism_register & !has_scandal_register),
+  religious_only = sum(has_religious_register & !has_tourism_register & !has_scandal_register),
+  tourism_only = sum(!has_religious_register & has_tourism_register & !has_scandal_register),
+  scandal_only = sum(!has_religious_register & !has_tourism_register & has_scandal_register),
+  multi = sum(has_religious_register + has_tourism_register + has_scandal_register > 1)
+), by = destination][order(-n_pairs)]
+
+register_presence[, pct_no_register := round(no_register / n_pairs * 100, 1)]
+register_presence[, pct_religious_only := round(religious_only / n_pairs * 100, 1)]
+register_presence[, pct_tourism_only := round(tourism_only / n_pairs * 100, 1)]
+register_presence[, pct_scandal_only := round(scandal_only / n_pairs * 100, 1)]
+register_presence[, pct_multi := round(multi / n_pairs * 100, 1)]
+
+kable(register_presence[, .(destination, n_pairs,
+                             pct_no_register, pct_religious_only,
+                             pct_tourism_only, pct_scandal_only, pct_multi)],
+      format.args = list(big.mark = ","),
+      caption = "Register distribution per destination (% of pairs)")
+```
+
+```{r}
+#| label: no-register-analysis
+
+# of all Sinj and Nin pairs, how many have NO register at all?
+no_reg_sensitive <- long[destination %in% sensitive_dests &
+                           !has_religious_register &
+                           !has_tourism_register &
+                           !has_scandal_register]
+
+cat("Sensitive destinations pairs with NO register match:\n")
+cat("  Total:", format(nrow(no_reg_sensitive), big.mark = ","), "\n")
+cat("  By destination:\n")
+print(no_reg_sensitive[, .N, by = destination])
+```
+
+# 3. Context Token Frequency Around Destination Matches
+
+For the large Sinj and Nin corpora, extract the most frequent tokens
+appearing in MENTION_SNIPPET. This reveals what the articles are
+actually about.
+
+```{r}
+#| label: token-frequency
+
+library(quanteda)
+
+extract_top_tokens <- function(dest_name, n_top = 40) {
+  subset_d <- long[destination == dest_name]
+  snippets <- subset_d$MENTION_SNIPPET
+  snippets <- snippets[!is.na(snippets)]
+
+  # quick tokenisation
+  toks <- tokens(snippets, what = "word",
+                 remove_punct = TRUE, remove_numbers = TRUE,
+                 remove_symbols = TRUE, remove_url = TRUE) |>
+    tokens_tolower() |>
+    tokens_select(min_nchar = 3)
+
+  # remove trivial Croatian stopwords
+  common_stops <- c("koji", "koja", "koje", "kako", "kada", "gdje", "tako",
+                    "samo", "više", "nego", "jedan", "dva", "tri", "sve",
+                    "bila", "bilo", "bile", "biti", "bila", "onda", "ovaj",
+                    "ova", "ovo", "njezin", "njegov", "sebe", "sobom",
+                    "svih", "svog", "svoje", "svim", "svu", "tome", "tog",
+                    "prema", "među", "takvim", "njima", "pri", "radi")
+  toks <- tokens_remove(toks, common_stops)
+
+  dfm_d <- dfm(toks)
+  top <- topfeatures(dfm_d, n = n_top)
+  data.table(token = names(top), freq = as.integer(top))
+}
+
+for (d in sensitive_dests) {
+  cat("=== Top tokens in", toupper(d), "snippets ===\n\n")
+  top_tokens <- extract_top_tokens(d, 40)
+  print(top_tokens)
+  fwrite(top_tokens, paste0("output/tables/01b_top_tokens_", d, ".csv"))
+  cat("\n")
+}
+```
+
+# 4. Known Contamination Patterns
+
+Specific regex checks for known non-target uses. These tell us directly
+how large the contamination is.
+
+```{r}
+#| label: known-contamination
+
+contamination_checks <- function(dest_name) {
+  subset_d <- long[destination == dest_name]
+  snip <- paste(subset_d$MENTION_SNIPPET, subset_d$TITLE, sep = " | ")
+
+  if (dest_name == "sinj") {
+    patterns <- c(
+      "Sinjković"           = "sinjković",
+      "Junak Sinj (sport)"  = "junak sinj|nk sinj|rk sinj",
+      "alkarsko (non shrine)" = "alkarsk[aeiou]",
+      "prometna nesreća u Sinju" = "nesreć.{0,50}(u|kod|blizu).{0,10}sinj",
+      "bez bilo kojeg religijskog trigera" = "^(?!.*(gospa|svet|marij|crkv|fratr|hodočast|franjev)).*$"
+    )
+  } else if (dest_name == "nin") {
+    patterns <- c(
+      "Nina (ime)"          = "\\bnin[aey]\\b",
+      "Nino (ime)"          = "\\bnin[oa]\\s+[A-ZČĆŽŠĐ]",
+      "nine (eng num)"      = "\\bnine\\b",
+      "training/mining"     = "training|mining|dining|burning",
+      "bez religijskog trigera" = "^(?!.*(tavel|bazilik|starohrvat|zavjet|krunidb|svetiš)).*$"
+    )
+  } else if (dest_name == "solin") {
+    patterns <- c(
+      "Solinjanin (prezime)" = "solinjanin",
+      "HNK Solin"           = "hnk solin|nk solin",
+      "bez religijskog trigera" = "^(?!.*(gospa od otoka|starohrvat|svetiš|bazilik)).*$"
+    )
+  }
+
+  results <- data.table(
+    pattern_name = names(patterns),
+    n_matches = sapply(patterns, function(p) {
+      sum(stri_detect_regex(snip, p, opts_regex = list(case_insensitive = TRUE)), na.rm = TRUE)
+    })
+  )
+  results[, total := nrow(subset_d)]
+  results[, pct := round(n_matches / total * 100, 1)]
+  results
+}
+
+for (d in sensitive_dests) {
+  cat("=== Contamination patterns in", toupper(d), "===\n")
+  cont <- contamination_checks(d)
+  print(kable(cont, caption = paste("Contamination check:", d)))
+  cat("\n")
+}
+```
+
+# 5. Control Comparison
+
+Compare register prevalence in sensitive destinations against unambiguous
+destinations (Marija Bistrica, Trsat, Aljmaš, Voćin, Vepric) to establish
+a baseline for what a clean corpus looks like.
+
+```{r}
+#| label: clean-vs-sensitive
+
+clean_dests <- c("marija_bistrica", "trsat", "aljmas", "vocin", "vepric")
+
+comparison <- long[, .(
+  n_pairs = .N,
+  pct_religious = round(mean(has_religious_register) * 100, 1),
+  pct_tourism = round(mean(has_tourism_register) * 100, 1),
+  pct_any_target_register = round(mean(has_religious_register | has_tourism_register) * 100, 1)
+), by = .(destination, dest_type)]
+
+comparison[, group := fifelse(destination %in% sensitive_dests, "sensitive",
+                              fifelse(destination %in% clean_dests, "clean", "other"))]
+comparison <- comparison[order(group, -n_pairs)]
+
+kable(comparison,
+      format.args = list(big.mark = ","),
+      caption = "Clean vs sensitive destination comparison")
+
+cat("\nGROUP MEANS (weighted by pair count):\n")
+group_means <- comparison[, .(
+  total_pairs = sum(n_pairs),
+  weighted_religious = round(sum(pct_religious * n_pairs) / sum(n_pairs), 1),
+  weighted_tourism = round(sum(pct_tourism * n_pairs) / sum(n_pairs), 1),
+  weighted_any_target = round(sum(pct_any_target_register * n_pairs) / sum(n_pairs), 1)
+), by = group]
+print(group_means)
+```
+
+# 6. Recommendation Generator
+
+Based on the diagnostic numbers, produce a recommendation for each
+sensitive destination.
+
+```{r}
+#| label: recommendation
+
+recommendations <- data.table(
+  destination = sensitive_dests
+)
+
+for (d in sensitive_dests) {
+  pairs <- long[destination == d, .N]
+  pct_rel <- long[destination == d, mean(has_religious_register) * 100]
+  pct_tour <- long[destination == d, mean(has_tourism_register) * 100]
+  pct_any <- long[destination == d, mean(has_religious_register | has_tourism_register) * 100]
+
+  recommendations[destination == d, `:=`(
+    pairs = pairs,
+    pct_religious = round(pct_rel, 1),
+    pct_tourism = round(pct_tour, 1),
+    pct_any_target = round(pct_any, 1),
+    verdict = fcase(
+      pct_any < 30, "HEAVY CONTAMINATION - Strategy B (register forced gate)",
+      pct_any < 50, "MODERATE CONTAMINATION - Strategy A or B",
+      pct_any < 70, "MILD CONTAMINATION - Strategy A (tighten triggers)",
+      default = "ACCEPTABLE - keep as is"
+    ),
+    projected_after_B = round(pairs * pct_any / 100)
+  )]
+}
+
+kable(recommendations, format.args = list(big.mark = ","),
+      caption = "Per-destination recommendation")
+```
+
+# 7. Summary Decision Brief
+
+```{r}
+#| label: summary
+
+cat(strrep("=", 60), "\n")
+cat("DIAGNOSTIC SUMMARY\n")
+cat(strrep("=", 60), "\n\n")
+
+total_sensitive <- sum(recommendations$pairs)
+projected_B <- sum(recommendations$projected_after_B)
+
+cat("Current sensitive corpus size:", format(total_sensitive, big.mark = ","),
+    "pairs\n")
+cat("Projected after Strategy B filter:",
+    format(projected_B, big.mark = ","),
+    " pairs (",
+    round(projected_B / total_sensitive * 100, 1), "%)\n\n", sep = "")
+
+cat("Clean destinations total:",
+    format(long[destination %in% clean_dests, .N], big.mark = ","), "\n")
+cat("Ludbreg + Krasno total:",
+    format(long[destination %in% c("ludbreg", "krasno"), .N], big.mark = ","),
+    "\n\n")
+
+cat("IMPLICATIONS FOR FINAL CORPUS SIZE:\n\n")
+cat("Strategy A (tighten patterns + triggers):\n")
+cat("  Unpredictable. Depends on how many genuine articles are kept.\n")
+cat("  Likely 15-30K total for sensitive destinations.\n\n")
+
+cat("Strategy B (register forced gate for sensitive only):\n")
+cat("  Projected ", format(projected_B, big.mark = ","),
+    " sensitive pairs\n")
+cat("  Clean destinations unaffected\n")
+cat("  Total corpus ~ ",
+    format(long[!destination %in% sensitive_dests, .N] + projected_B,
+           big.mark = ","), " pairs\n\n", sep = "")
+
+cat("Strategy C (register forced gate globally):\n")
+total_C <- long[has_religious_register | has_tourism_register, .N]
+cat("  Applies register gate to ALL destinations\n")
+cat("  Total corpus size: ", format(total_C, big.mark = ","),
+    " pairs (",
+    round(total_C / nrow(long) * 100, 1), "% of current)\n", sep = "")
+cat("  Cleanest but loses some legitimate no register mentions\n")
+cat(strrep("=", 60), "\n")
+```
+
+# 8. Save Diagnostics
+
+```{r}
+#| label: save
+
+diagnostic_out <- list(
+  timestamp = Sys.time(),
+  samples = samples,
+  register_presence = register_presence,
+  comparison = comparison,
+  group_means = group_means,
+  recommendations = recommendations,
+  projected_strategy_B = projected_B,
+  total_strategy_C = total_C
+)
+saveRDS(diagnostic_out, "data/destinations_diagnostic.rds")
+cat("Diagnostic saved to data/destinations_diagnostic.rds\n")
+```

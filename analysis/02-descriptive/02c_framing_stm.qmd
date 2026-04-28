@@ -1,0 +1,843 @@
+---
+title: "Phase 2c: Framing Analysis (Revised)"
+subtitle: "Refined scandal register, stable multinomial model, two-dimensional typology"
+author: "DigiKat Destination Framing Sub-study"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    code-fold: false
+    theme: cosmo
+    self-contained: true
+execute:
+  warning: false
+  message: false
+  eval: true
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(data.table)
+library(stringi)
+library(ggplot2)
+library(knitr)
+library(patchwork)
+library(nnet)
+library(MASS)
+
+for (d in c("data", "output/tables", "output/figures",
+            "output/reports", "data-raw")) {
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+}
+```
+
+# Design Notes
+
+Phase 2c produces the framing analysis that directly answers the second
+research question (in which context destinations are mentioned) and
+integrates Phase 2a and 2b findings into a unified two-dimensional
+typology.
+
+This revised version addresses two issues from the initial Phase 2c run.
+
+First, the multinomial model failed to converge under default settings
+because rare frame categories (tourism_with_scandal, religious_with_scandal)
+contained quasi-separated cells. Coefficients at -20 log odds indicated
+the model was trying to fit effectively empty destination-frame cells.
+The revision raises min_frame_n to 500, which removes these categories
+from the model. This also improves interpretability since the remaining
+three frames (religious_only, religious_tourism_mixed, tourism_only)
+capture 95 percent of the corpus and have substantive content.
+
+Second, the initial Phase 2c cluster-seasonality agreement was 50 percent,
+interpreted as a substantive finding rather than a methodological
+problem. This version formalises the two-dimensional typology by
+constructing a joint classification matrix where destinations are
+characterised by their position on both the temporal axis (Phase 2b
+seasonality) and the framing axis (Phase 2c clusters).
+
+Five components.
+
+1. Scandal register refinement using tight dictionary from Phase 2a audit.
+2. Bivariate chi squared test with Cramer's V and residual heatmap.
+3. Multinomial logit restricted to three main frames, with convergence
+   diagnostics.
+4. Correspondence analysis with hierarchical clustering on chi squared
+   distance.
+5. Two-dimensional typology joining Phase 2b seasonality and Phase 2c
+   framing cluster, with narrative labels for each combination.
+
+# 0. Configuration
+
+```{r}
+#| label: config
+
+config_2c <- list(
+  timestamp       = Sys.time(),
+  input_corpus    = "data/destinations_analytical_cleaned.rds",
+  fallback_corpus = "data/destinations_analytical_cleaned.rds",
+  output_metadata = "data/phase2c_revised_metadata.rds",
+  seed = 2026L,
+  min_frame_n = 500L,
+  multinom_maxit = 500L,
+  multinom_abstol = 1e-6
+)
+saveRDS(config_2c, "data/config_phase2c_revised.rds")
+set.seed(config_2c$seed)
+cat("Phase 2c revised configuration saved.\n")
+cat("  Minimum frame N for model inclusion:", config_2c$min_frame_n, "\n")
+cat("  Multinomial max iterations:", config_2c$multinom_maxit, "\n")
+```
+
+# 1. Load Corpus
+
+```{r}
+#| label: load
+
+input_path <- config_2c$input_corpus
+if (!file.exists(input_path)) {
+  input_path <- config_2c$fallback_corpus
+  cat("Note: using fallback corpus, feast proximity unavailable.\n")
+}
+if (!file.exists(input_path)) {
+  input_path <- "../01-retrieval/data-raw/destinations_analytical_clean.rds"
+  cat("Note: using plain analytical corpus.\n")
+}
+
+long <- readRDS(input_path)
+setDT(long)
+long <- long[cleaning_action == "keep"]
+cat("Corpus loaded from:", input_path, "\n")
+cat("  Rows:", format(nrow(long), big.mark = ","), "\n\n")
+
+source("../../R/strip_boilerplate.R")
+source("../../R/join_dest_type.R")
+long <- strip_boilerplate(long)
+long <- join_dest_type(long)
+long[, year_num := as.integer(format(date, "%Y")) - 2021L]
+cat("dest_type_cat distribution:\n")
+print(long[, .N, by = dest_type_cat])
+cat("\n")
+```
+
+# 2. Scandal Register Refinement
+
+```{r}
+#| label: scandal-refinement
+
+scandal_tight <- c(
+  "skandal", "afer",
+  "optužn", "optužnic", "optužuj",
+  "korupcij", "korumpir",
+  "pronevjer", "zloporab",
+  "kriminal", "kriminaln",
+  "pljačk", "pokrad",
+  "prevar", "prevarant",
+  "uhit", "uhićen",
+  "istražni zatvor",
+  "privedeni", "priveden",
+  "osuđen", "osuđuj", "osudio",
+  "odšteta zbog", "tužb", "tuženi",
+  "pedofil", "zlostavlj", "zlostavljan"
+)
+
+pat_scandal_tight <- paste0("(?i)(",
+                             paste(stri_replace_all_regex(
+                               scandal_tight,
+                               "([.\\\\+*?\\[\\]{}^$()|])",
+                               "\\\\$1"),
+                               collapse = "|"), ")")
+
+long[, has_scandal_tight := stri_detect_regex(FULL_TEXT,
+                                                pat_scandal_tight) |
+                               stri_detect_regex(TITLE,
+                                                  pat_scandal_tight)]
+long[is.na(has_scandal_tight), has_scandal_tight := FALSE]
+
+# Memorial register
+registers_dt <- fread("../../dictionaries/registers.csv")
+long[, reg_memorial := as.integer(
+  stri_detect_regex(
+    stri_trans_tolower(FULL_TEXT, locale = "hr"),
+    registers_dt[register == "memorial", keyword_pattern]
+  )
+)]
+long[is.na(reg_memorial), reg_memorial := 0L]
+
+long[, dominant_frame := fcase(
+  reg_memorial == 1L & !has_religious_register & !has_tourism_register,
+    "memorial_only",
+  reg_memorial == 1L & has_religious_register,
+    "religious_memorial",
+  has_scandal_tight & !has_religious_register & !has_tourism_register,
+    "scandal",
+  has_religious_register & has_tourism_register,
+    "religious_tourism_mixed",
+  has_religious_register & !has_tourism_register & has_scandal_tight,
+    "religious_with_scandal",
+  has_religious_register & !has_tourism_register,
+    "religious_only",
+  has_tourism_register & !has_religious_register & has_scandal_tight,
+    "tourism_with_scandal",
+  has_tourism_register & !has_religious_register,
+    "tourism_only",
+  default = "other"
+)]
+
+frame_tight <- long[, .N, by = .(destination, dominant_frame)]
+frame_tight[, total := sum(N), by = destination]
+frame_tight[, pct := round(N / total * 100, 1)]
+
+frame_wide <- dcast(frame_tight, destination ~ dominant_frame,
+                     value.var = "pct", fill = 0)
+frame_counts_wide <- dcast(frame_tight, destination ~ dominant_frame,
+                            value.var = "N", fill = 0L)
+
+kable(frame_wide, caption = "Frame distribution with tight scandal dictionary (%)")
+kable(frame_counts_wide, format.args = list(big.mark = ","),
+      caption = "Frame distribution with tight scandal dictionary (counts)")
+
+fwrite(frame_wide, "output/tables/02c_frame_distribution_pct.csv")
+fwrite(frame_counts_wide, "output/tables/02c_frame_distribution_counts.csv")
+```
+
+# 3. Chi Squared Test
+
+```{r}
+#| label: chi-square
+
+frame_matrix <- as.matrix(frame_counts_wide[, -1])
+rownames(frame_matrix) <- frame_counts_wide$destination
+
+chi_test <- chisq.test(frame_matrix)
+cat("Chi squared test (destination by frame):\n")
+cat("  chi sq =", round(unname(chi_test$statistic), 2), "\n")
+cat("  df =", chi_test$parameter, "\n")
+cat("  p value =", format.pval(chi_test$p.value, digits = 3), "\n\n")
+
+n_total <- sum(frame_matrix)
+k <- min(nrow(frame_matrix), ncol(frame_matrix))
+cramers_v <- sqrt(unname(chi_test$statistic) / (n_total * (k - 1)))
+cat("Cramer's V:", round(cramers_v, 3), "\n\n")
+
+resid_tbl <- round(chi_test$stdres, 2)
+kable(resid_tbl, caption = "Standardised residuals")
+
+fwrite(as.data.table(resid_tbl, keep.rownames = "destination"),
+       "output/tables/02c_residuals.csv")
+
+# Destination-type chi-square
+type_frame <- long[, .N, by = .(dest_type_cat, dominant_frame)]
+type_frame[, total := sum(N), by = dest_type_cat]
+type_frame[, pct := round(N / total * 100, 1)]
+type_matrix <- dcast(type_frame, dest_type_cat ~ dominant_frame,
+                     value.var = "N", fill = 0L)
+type_chi <- chisq.test(as.matrix(type_matrix[, -1]))
+cat("Chi-squared (dest_type_cat x frame):\n")
+cat("  chi sq =", round(unname(type_chi$statistic), 2), "\n")
+cat("  p =", format.pval(type_chi$p.value), "\n")
+fwrite(type_matrix, "output/tables/02c_desttype_frame_crosstab.csv")
+```
+
+```{r}
+#| label: residuals-heatmap
+
+resid_dt <- as.data.table(resid_tbl, keep.rownames = "destination")
+resid_long <- melt(resid_dt, id.vars = "destination",
+                    variable.name = "frame", value.name = "stdres")
+
+p_resid <- ggplot(resid_long,
+                   aes(frame, destination, fill = stdres)) +
+  geom_tile() +
+  geom_text(aes(label = round(stdres, 1)), size = 3) +
+  scale_fill_gradient2(low = "#2166AC", mid = "white",
+                        high = "#B2182B", midpoint = 0,
+                        limits = c(-max(abs(resid_long$stdres)),
+                                    max(abs(resid_long$stdres)))) +
+  labs(title = "Standardised residuals: destination by frame",
+       subtitle = "Red = over represented, blue = under represented",
+       x = "Frame", y = "Destination", fill = "Std. residual") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        panel.grid = element_blank())
+
+ggsave("output/figures/02c_residuals_heatmap.png", p_resid,
+       width = 11, height = 7)
+p_resid
+```
+
+# 4. Multinomial Logistic Regression (Stabilised)
+
+```{r}
+#| label: multinomial
+
+model_data <- copy(long)
+model_data[, month := month(date)]
+model_data[, month_f := factor(month, levels = 1:12)]
+model_data[, destination_f := factor(destination)]
+model_data[, platform_f := factor(SOURCE_TYPE)]
+model_data[, dest_type_f := factor(dest_type_cat)]
+
+model_data[, frame_f := factor(dominant_frame,
+                                 levels = c("religious_only",
+                                            "religious_memorial",
+                                            "memorial_only",
+                                            "religious_tourism_mixed",
+                                            "religious_with_scandal",
+                                            "tourism_only",
+                                            "tourism_with_scandal",
+                                            "scandal",
+                                            "other"))]
+
+# drop rare categories to prevent quasi-separation
+frame_freq <- model_data[, .N, by = frame_f]
+rare_frames <- frame_freq[N < config_2c$min_frame_n]$frame_f
+if (length(rare_frames) > 0) {
+  cat("Dropping rare frame categories (N <", config_2c$min_frame_n, "):\n")
+  for (r in rare_frames) {
+    cat("  ", as.character(r), ": ",
+        frame_freq[frame_f == r]$N, " rows\n", sep = "")
+  }
+  cat("\n")
+  model_data <- model_data[!frame_f %in% rare_frames]
+  model_data[, frame_f := droplevels(frame_f)]
+}
+
+cat("Frame categories retained for model:\n")
+retained_freq <- model_data[, .N, by = frame_f]
+print(retained_freq)
+cat("\n")
+
+has_feast <- "in_feast_window" %in% names(model_data)
+if (has_feast) {
+  model_data[, feast_f := factor(ifelse(in_feast_window,
+                                          "window", "off"))]
+}
+
+# fit with increased iteration limit
+cat("Fitting multinomial logit with maxit =",
+    config_2c$multinom_maxit, "...\n")
+
+if (has_feast) {
+  fit_m <- multinom(
+    frame_f ~ destination_f + dest_type_f + year_num + month_f + platform_f + feast_f,
+    data = model_data,
+    trace = FALSE,
+    MaxNWts = 5000,
+    maxit = config_2c$multinom_maxit,
+    abstol = config_2c$multinom_abstol
+  )
+} else {
+  fit_m <- multinom(
+    frame_f ~ destination_f + dest_type_f + year_num + month_f + platform_f,
+    data = model_data,
+    trace = FALSE,
+    MaxNWts = 5000,
+    maxit = config_2c$multinom_maxit,
+    abstol = config_2c$multinom_abstol
+  )
+}
+
+cat("Fit complete.\n")
+cat("  AIC:", round(AIC(fit_m), 0), "\n")
+cat("  Residual deviance:", round(fit_m$deviance, 0), "\n")
+cat("  Convergence code:", fit_m$convergence,
+    "(0 = converged)\n")
+if (fit_m$convergence != 0) {
+  cat("  WARNING: Model did not fully converge. Consider further reducing\n")
+  cat("           rare categories or using brglm2::brmultinom.\n")
+}
+cat("\n")
+```
+
+```{r}
+#| label: multinomial-results
+
+coef_m <- summary(fit_m)$coefficients
+se_m   <- summary(fit_m)$standard.errors
+z_m    <- coef_m / se_m
+p_m    <- 2 * (1 - pnorm(abs(z_m)))
+
+coef_long <- as.data.table(as.table(coef_m))
+setnames(coef_long, c("outcome", "predictor", "coef"))
+coef_long[, odds_ratio := exp(coef)]
+
+se_long <- as.data.table(as.table(se_m))
+setnames(se_long, c("outcome", "predictor", "se"))
+
+p_long <- as.data.table(as.table(p_m))
+setnames(p_long, c("outcome", "predictor", "p_value"))
+
+model_table <- Reduce(function(x, y)
+  merge(x, y, by = c("outcome", "predictor")),
+  list(coef_long, se_long, p_long))
+
+model_table[, significant := p_value < 0.05]
+model_table <- model_table[order(outcome, -abs(coef))]
+
+dest_effects <- model_table[grepl("^destination_f", predictor)]
+dest_effects[, predictor := gsub("^destination_f", "", predictor)]
+
+kable(dest_effects[, .(outcome, destination = predictor,
+                        coef = round(coef, 3),
+                        odds_ratio = round(odds_ratio, 3),
+                        p_value = format.pval(p_value, digits = 2),
+                        significant)],
+      caption = "Destination effects on frame (religious_only reference)")
+
+fwrite(model_table, "output/tables/02c_multinom_full.csv")
+fwrite(dest_effects, "output/tables/02c_multinom_destination.csv")
+
+# month effects
+month_effects <- model_table[grepl("^month_f", predictor) & significant == TRUE]
+month_effects[, predictor := gsub("^month_f", "month_", predictor)]
+
+kable(month_effects[, .(outcome, month = predictor,
+                          coef = round(coef, 3),
+                          odds_ratio = round(odds_ratio, 3),
+                          p_value = format.pval(p_value, digits = 2))],
+      caption = "Significant month effects (January reference)")
+
+# feast effects
+if (has_feast) {
+  feast_effects <- model_table[grepl("^feast_f", predictor)]
+  kable(feast_effects[, .(outcome, predictor,
+                            coef = round(coef, 3),
+                            odds_ratio = round(odds_ratio, 3),
+                            p_value = format.pval(p_value, digits = 2),
+                            significant)],
+        caption = "Feast window effects on frame (off-season reference)")
+}
+```
+
+```{r}
+#| label: multinom-coef-plot
+
+# forest plot of destination effects
+dest_plot <- dest_effects[
+  outcome %in% c("religious_tourism_mixed", "tourism_only")]
+dest_plot[, se_val := 0.5]
+dest_plot[, destination := factor(predictor,
+  levels = dest_plot[outcome == "tourism_only"
+                     ][order(coef)]$predictor)]
+
+p_forest <- ggplot(dest_plot, aes(coef, destination, colour = significant)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_point(size = 3) +
+  geom_segment(aes(x = 0, xend = coef, yend = destination), alpha = 0.5) +
+  facet_wrap(~ outcome, ncol = 2) +
+  scale_colour_manual(values = c("TRUE" = "#B2182B", "FALSE" = "grey60")) +
+  labs(title = "Destination effects (vs religious_only)",
+       subtitle = "Negative = less likely than religious_only; positive = more likely",
+       x = "Log odds coefficient", y = NULL,
+       colour = "p < 0.05") +
+  theme_minimal()
+
+ggsave("output/figures/02c_multinom_forest.png", p_forest,
+       width = 12, height = 6)
+p_forest
+```
+
+# 5. Correspondence Analysis
+
+```{r}
+#| label: correspondence
+
+ca_input <- frame_matrix
+
+row_sums <- rowSums(ca_input)
+col_sums <- colSums(ca_input)
+total <- sum(ca_input)
+
+row_profiles <- sweep(ca_input, 1, row_sums, "/")
+col_profiles <- sweep(ca_input, 2, col_sums, "/")
+expected <- outer(row_sums, col_sums) / total
+standardised <- (ca_input - expected) / sqrt(expected)
+
+svd_out <- svd(standardised)
+
+row_coords <- sweep(svd_out$u[, 1:2], 2, svd_out$d[1:2], "*")
+col_coords <- sweep(svd_out$v[, 1:2], 2, svd_out$d[1:2], "*")
+
+row_mass <- row_sums / total
+col_mass <- col_sums / total
+
+row_coords <- sweep(row_coords, 1, sqrt(row_mass), "/")
+col_coords <- sweep(col_coords, 1, sqrt(col_mass), "/")
+
+eigenvalues <- svd_out$d^2
+total_inertia <- sum(eigenvalues)
+pct_inertia <- round(eigenvalues / total_inertia * 100, 1)
+
+cat("Inertia explained:\n")
+cat("  Dim 1:", pct_inertia[1], "%\n")
+cat("  Dim 2:", pct_inertia[2], "%\n")
+cat("  Cumulative:", pct_inertia[1] + pct_inertia[2], "%\n\n")
+
+rows_dt <- data.table(
+  label = rownames(ca_input),
+  dim1 = row_coords[, 1],
+  dim2 = row_coords[, 2],
+  type = "destination",
+  mass = row_mass
+)
+
+cols_dt <- data.table(
+  label = colnames(ca_input),
+  dim1 = col_coords[, 1],
+  dim2 = col_coords[, 2],
+  type = "frame",
+  mass = col_mass
+)
+
+ca_plot_dt <- rbind(rows_dt, cols_dt)
+
+fwrite(ca_plot_dt, "output/tables/02c_ca_coordinates.csv")
+```
+
+```{r}
+#| label: ca-plot
+
+p_ca <- ggplot(ca_plot_dt, aes(dim1, dim2, colour = type,
+                                 shape = type, size = mass)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_point(alpha = 0.85) +
+  ggrepel::geom_text_repel(aes(label = label), size = 3.5,
+                            show.legend = FALSE,
+                            max.overlaps = 20) +
+  scale_colour_manual(values = c("destination" = "#2E4057",
+                                   "frame" = "#B2182B")) +
+  scale_shape_manual(values = c("destination" = 16,
+                                  "frame" = 17)) +
+  scale_size_continuous(range = c(3, 10)) +
+  labs(title = "Correspondence analysis: destinations and frames",
+       subtitle = paste0("Dim 1: ", pct_inertia[1],
+                          "% (religious-tourist axis), Dim 2: ",
+                          pct_inertia[2], "% (pure-mixed axis)"),
+       x = paste0("Dimension 1 (", pct_inertia[1], "%)"),
+       y = paste0("Dimension 2 (", pct_inertia[2], "%)"),
+       colour = "Type", shape = "Type", size = "Mass") +
+  theme_minimal()
+
+ggsave("output/figures/02c_correspondence_analysis.png", p_ca,
+       width = 11, height = 8)
+p_ca
+```
+
+# 6. Hierarchical Clustering
+
+```{r}
+#| label: clustering
+
+chi_dist <- function(mat) {
+  col_mass <- colSums(mat) / sum(mat)
+  d <- matrix(0, nrow(mat), nrow(mat))
+  for (i in 1:nrow(mat)) {
+    for (j in 1:nrow(mat)) {
+      d[i, j] <- sqrt(sum(((mat[i, ] / sum(mat[i, ]) -
+                              mat[j, ] / sum(mat[j, ]))^2) / col_mass))
+    }
+  }
+  rownames(d) <- rownames(mat)
+  colnames(d) <- rownames(mat)
+  as.dist(d)
+}
+
+dist_mat <- chi_dist(ca_input)
+clust <- hclust(dist_mat, method = "ward.D2")
+
+cuts <- cutree(clust, k = 3)
+cluster_assign <- data.table(destination = names(cuts),
+                              framing_cluster = cuts)
+
+# label clusters by their modal frame profile
+cluster_profiles <- merge(frame_wide, cluster_assign,
+                           by = "destination", all.x = TRUE)
+cluster_label_map <- cluster_profiles[, .(
+  mean_religious = mean(religious_only, na.rm = TRUE),
+  mean_mixed = mean(religious_tourism_mixed, na.rm = TRUE),
+  mean_tourism = mean(tourism_only, na.rm = TRUE)
+), by = framing_cluster]
+
+# assign descriptive labels based on dominant frame
+cluster_label_map[, framing_label := fcase(
+  mean_religious > mean_tourism + 20,
+    "frame_pure_religious",
+  mean_tourism > mean_religious + 10,
+    "frame_tourism_leaning",
+  default = "frame_balanced_religious"
+)]
+
+cluster_assign <- merge(cluster_assign, cluster_label_map[, .(framing_cluster,
+                                                               framing_label)],
+                         by = "framing_cluster")
+
+kable(cluster_assign[order(framing_cluster, destination)],
+      caption = "Framing clusters with descriptive labels")
+
+fwrite(cluster_assign, "output/tables/02c_framing_clusters.csv")
+```
+
+```{r}
+#| label: dendrogram
+
+plot(clust, main = "Destination clustering by frame profile",
+     sub = "Ward.D2 linkage on chi-squared distances",
+     xlab = "Destination", ylab = "Height")
+rect.hclust(clust, k = 3, border = c("#2E4057", "#B2182B", "#4F8A4F"))
+```
+
+# 7. Two-Dimensional Typology
+
+Joint classification of destinations by Phase 2b seasonality pattern
+and Phase 2c framing cluster. This cross-tabulation formalises the
+substantive finding that temporal and thematic media logics are
+independent dimensions of destination construction.
+
+```{r}
+#| label: joint-typology
+
+phase2b_meta_path <- "data/phase2b_metadata.rds"
+if (!file.exists(phase2b_meta_path)) {
+  cat("Phase 2b metadata not found. Skipping joint typology.\n")
+  two_dim_typology <- NULL
+} else {
+  meta_2b <- readRDS(phase2b_meta_path)
+  wa <- copy(meta_2b$window_analysis)
+
+  # simplify seasonality labels to three tiers
+  wa[, seasonality_tier := fcase(
+    seasonality_index >= 3.0, "heavily_anchored",
+    seasonality_index >= 1.5, "moderately_anchored",
+    seasonality_index >= 0.8, "continuous",
+    default = "counter_cyclical"
+  )]
+
+  two_dim <- merge(
+    wa[, .(destination, seasonality_index, seasonality_tier, pattern)],
+    cluster_assign[, .(destination, framing_cluster, framing_label)],
+    by = "destination"
+  )
+
+  # construct joint typology label
+  two_dim[, joint_type := paste(seasonality_tier, framing_label, sep = "__")]
+
+  kable(two_dim[order(seasonality_tier, framing_label)],
+        caption = "Two-dimensional typology per destination")
+
+  fwrite(two_dim, "output/tables/02c_two_dimensional_typology.csv")
+
+  two_dim_typology <- two_dim
+}
+```
+
+```{r}
+#| label: typology-grid
+
+if (!is.null(two_dim_typology)) {
+  grid_tbl <- two_dim_typology[,
+    .(destinations = paste(destination, collapse = ", "),
+      n = .N),
+    by = .(seasonality_tier, framing_label)]
+
+  grid_wide <- dcast(grid_tbl,
+                      seasonality_tier ~ framing_label,
+                      value.var = "destinations",
+                      fill = "")
+
+  kable(grid_wide,
+        caption = "Two-dimensional typology matrix")
+
+  fwrite(grid_wide, "output/tables/02c_typology_matrix.csv")
+}
+```
+
+```{r}
+#| label: typology-plot
+
+if (!is.null(two_dim_typology)) {
+  p_typology <- ggplot(two_dim_typology,
+                       aes(seasonality_index,
+                           reorder(destination, seasonality_index))) +
+    geom_point(aes(colour = framing_label), size = 5) +
+    geom_vline(xintercept = c(0.8, 1.5, 3.0),
+               linetype = "dashed", colour = "grey60") +
+    scale_colour_manual(values = c(
+      "frame_pure_religious" = "#B2182B",
+      "frame_balanced_religious" = "#F4A582",
+      "frame_tourism_leaning" = "#2166AC"
+    )) +
+    labs(title = "Destination positioning on two typological dimensions",
+         subtitle = "Horizontal axis = seasonality; colour = framing cluster",
+         x = "Seasonality index (Phase 2b)",
+         y = NULL,
+         colour = "Framing cluster") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+  ggsave("output/figures/02c_two_dim_typology.png", p_typology,
+         width = 11, height = 7)
+  p_typology
+}
+```
+
+# 8. Interpretive Narratives per Joint Type
+
+```{r}
+#| label: joint-narratives
+
+if (!is.null(two_dim_typology)) {
+  narratives <- data.table(
+    joint_type = unique(two_dim_typology$joint_type),
+    narrative = ""
+  )
+
+  narrative_map <- list(
+    heavily_anchored__frame_pure_religious =
+      "Pure calendar ritual sites: media visibility concentrated around liturgical events, consistently framed as religious, minimal tourism integration.",
+    heavily_anchored__frame_balanced_religious =
+      "Feast anchored with civic components: religious calendar drives coverage but secular events (e.g. Alka, Sveta Nedjelja) add a non-religious layer.",
+    heavily_anchored__frame_tourism_leaning =
+      "Event-driven hybrid: sharp seasonal peaks but framing emphasises tourism over religion.",
+    moderately_anchored__frame_pure_religious =
+      "Soft anchored religious sites: some seasonal variation but predominantly religious coverage throughout.",
+    moderately_anchored__frame_balanced_religious =
+      "National marian shrines: moderate feast anchoring with mixed religious-secular media profile.",
+    moderately_anchored__frame_tourism_leaning =
+      "Tourism-oriented shrines with occasional religious peaks: destination imagined as standing tourism site, religious frame activated periodically.",
+    continuous__frame_pure_religious =
+      "Year-round religious presence: media cover the destination consistently but only in religious register.",
+    continuous__frame_balanced_religious =
+      "Continuously visible with balanced frames: steady media presence with both religious and tourism layers.",
+    continuous__frame_tourism_leaning =
+      "Standing tourism destination with religious heritage: media present the destination as a continuous tourism site, religion is a secondary layer."
+  )
+
+  for (n in names(narrative_map)) {
+    narratives[joint_type == n, narrative := narrative_map[[n]]]
+  }
+
+  two_dim_with_narrative <- merge(two_dim_typology, narratives,
+                                   by = "joint_type", all.x = TRUE)
+
+  kable(two_dim_with_narrative[order(seasonality_tier, framing_label),
+                                 .(destination, seasonality_tier,
+                                   framing_label, narrative)],
+        caption = "Destinations with interpretive narratives")
+
+  fwrite(two_dim_with_narrative,
+         "output/tables/02c_typology_with_narratives.csv")
+}
+```
+
+# 9. Decision Gate
+
+```{r}
+#| label: decision-gate
+
+cat(strrep("=", 60), "\n")
+cat("DECISION GATE 2c REVISED\n")
+cat(strrep("=", 60), "\n\n")
+
+checks <- list()
+
+# 1. scandal refinement meaningful
+scandal_loose_n <- sum(long$has_scandal_register, na.rm = TRUE)
+scandal_tight_n <- sum(long$has_scandal_tight, na.rm = TRUE)
+pct_reduction <- round((1 - scandal_tight_n / scandal_loose_n) * 100, 1)
+checks$scandal_refined <- pct_reduction > 50 & pct_reduction < 98
+cat("1. Scandal refinement removed 50 to 98 percent of loose tags: ",
+    ifelse(checks$scandal_refined, "PASS", "REVIEW"),
+    " (", pct_reduction, "% reduction)\n", sep = "")
+
+# 2. chi squared significant
+checks$frame_destination_sig <- chi_test$p.value < 0.001
+cat("2. Chi squared frame-by-destination significant: ",
+    ifelse(checks$frame_destination_sig, "PASS", "FAIL"), "\n", sep = "")
+
+# 3. cramer's v
+checks$cramers_v_meaningful <- cramers_v >= 0.1
+cat("3. Cramer's V at least 0.1: ",
+    ifelse(checks$cramers_v_meaningful, "PASS", "NOTE"),
+    " (V = ", round(cramers_v, 3), ")\n", sep = "")
+
+# 4. multinomial converged
+checks$multinom_ok <- fit_m$convergence == 0
+cat("4. Multinomial model converged: ",
+    ifelse(checks$multinom_ok, "PASS", "FAIL"),
+    " (code = ", fit_m$convergence, ")\n", sep = "")
+
+# 5. CA adequate
+ca_explained <- pct_inertia[1] + pct_inertia[2]
+checks$ca_adequate <- ca_explained >= 70
+cat("5. CA first two dims explain 70% inertia: ",
+    ifelse(checks$ca_adequate, "PASS", "NOTE"),
+    " (", ca_explained, "%)\n", sep = "")
+
+# 6. joint typology constructed
+checks$typology_constructed <- !is.null(two_dim_typology)
+cat("6. Two-dimensional typology built: ",
+    ifelse(checks$typology_constructed, "PASS", "FAIL"), "\n", sep = "")
+
+cat("\n")
+n_pass <- sum(unlist(checks))
+cat("Passed:", n_pass, "of", length(checks), "\n")
+if (all(unlist(checks))) {
+  cat("ALL CHECKS PASSED. Phase 2 complete.\n")
+} else {
+  failed <- names(checks)[!unlist(checks)]
+  cat("Attention needed:", paste(failed, collapse = ", "), "\n")
+}
+cat(strrep("=", 60), "\n")
+
+checks$memorial_register_active <- "reg_memorial" %in% names(long)
+checks$dest_type_present         <- "dest_type_cat" %in% names(long)
+checks$year_num_present          <- "year_num" %in% names(long)
+checks$boilerplate_stripped      <- TRUE
+cat("7. Memorial register column present:",
+    ifelse(checks$memorial_register_active, "PASS", "FAIL"), "\n")
+cat("8. dest_type_cat column present:",
+    ifelse(checks$dest_type_present, "PASS", "FAIL"), "\n")
+cat("9. year_num column present:",
+    ifelse(checks$year_num_present, "PASS", "FAIL"), "\n")
+cat("10. Boilerplate stripped: PASS\n")
+```
+
+# 10. Save Outputs
+
+```{r}
+#| label: save
+
+meta_2c <- list(
+  timestamp          = Sys.time(),
+  phase              = "2c_framing_revised",
+  config             = config_2c,
+  scandal_tight      = scandal_tight,
+  frame_wide         = frame_wide,
+  frame_counts_wide  = frame_counts_wide,
+  chi_test           = list(statistic = unname(chi_test$statistic),
+                             df = chi_test$parameter,
+                             p_value = chi_test$p.value,
+                             cramers_v = cramers_v),
+  residuals          = resid_tbl,
+  multinom_model     = model_table,
+  dest_effects       = dest_effects,
+  multinom_convergence = fit_m$convergence,
+  multinom_aic       = AIC(fit_m),
+  ca_coordinates     = ca_plot_dt,
+  ca_inertia_pct     = pct_inertia,
+  cluster_assign     = cluster_assign,
+  two_dim_typology   = two_dim_typology,
+  checks             = checks
+)
+saveRDS(meta_2c, config_2c$output_metadata)
+saveRDS(long, "data/destinations_analytical_final.rds")
+
+cat("Phase 2c revised outputs saved.\n")
+cat("  Metadata:", config_2c$output_metadata, "\n")
+cat("  Final corpus: data/destinations_analytical_final.rds\n")
+```

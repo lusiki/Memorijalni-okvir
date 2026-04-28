@@ -1,0 +1,81 @@
+# Machine-specific overrides
+CLAUDE.local.md
+
+# R environment
+renv/library/
+renv/staging/
+renv/cellar/
+renv/sandbox/
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+
+# Data files (too large for git)
+data-raw/*.rds
+data-raw/*.parquet
+data-raw/*.csv
+data/*.rds
+data/*.parquet
+data/*.csv
+
+# Database files
+*.duckdb
+*.duckdb.wal
+
+# Output artefacts (regenerable from pipeline)
+output/tables/*
+output/figures/*
+output/reports/*
+output/metadata/*
+!output/**/.gitkeep
+
+# Manuscript rendered output — pdf/html/docx kept for GitHub landing page
+manuscript/_site/
+manuscript/manuscript_files/
+manuscript/supplementary/supplementary_files/
+manuscript/manuscript_files
+manuscript/*_files/
+
+# Python
+python/.venv/
+python/__pycache__/
+*.pyc
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Quarto intermediate (but NOT the rendered outputs)
+.quarto/
+*_cache/
+*.aux
+*.log
+*.synctex.gz
+*.tex
+
+# Large analysis data, models and regenerable outputs
+analysis/*/data/
+analysis/*/data-raw/
+analysis/01-retrieval/output/tables/
+analysis/01-retrieval/output/figures/
+analysis/02-descriptive/output/tables/
+analysis/02-descriptive/output/figures/
+analysis/02-descriptive/output/metadata/
+# Keep 03-framing/output/tables because CSV outputs are small and useful
+# analysis/03-framing/output/tables/ — intentionally tracked
+
+# Intercoder validation sheets (may contain article text)
+validation/intercoder/coding_sheet_coder*.csv
+
+# Archives content (keep the directory)
+archives/*
+!archives/.gitkeep
+
+# Validation data (may contain sampled articles)
+validation/coding-sheets/*.csv
+validation/annotated/*.csv
+validation/context-gate-audit/*.csv
+validation/sentiment-validation/*.csv
+!validation/**/.gitkeep
